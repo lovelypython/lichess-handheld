@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, queue, threading, io, base64, time
+import os, sys, json, queue, threading, io, base64, time, subprocess, re
 import requests
 import pygame
 import chess
@@ -61,10 +61,27 @@ def load_piece_surfaces():
     return result
 
 def headers():
-    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.52"}
+    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.53"}
     if TOKEN:
         h["Authorization"] = f"Bearer {TOKEN}"
     return h
+
+
+# Built-in Wi-Fi profiles for the handheld.
+# Priority: lower number = preferred.
+# Passwords are base64-obfuscated only; this is not cryptographic protection.
+def _wifi_secret(encoded):
+    return base64.b64decode(encoded).decode("utf-8")
+
+KNOWN_WIFI_PROFILES = [
+    {"ssid": "REPLACE_WITH_YOUR_WIFI_SSID", "password_b64": "UkVQTEFDRV9XSVRIX1lPVVJfV0lGSV9QQVNTV09SRA==", "priority": 1},
+    {"ssid": "REPLACE_WITH_YOUR_WIFI_SSID", "password_b64": "UkVQTEFDRV9XSVRIX1lPVVJfV0lGSV9QQVNTV09SRA==", "priority": 2},
+    {"ssid": "REPLACE_WITH_YOUR_WIFI_SSID", "password_b64": "UkVQTEFDRV9XSVRIX1lPVVJfV0lGSV9QQVNTV09SRA==", "priority": 3},
+]
+
+# The Mac simulator follows the same priority logic and can switch Wi-Fi.
+# Set LICHESS_AUTO_WIFI=0 before launch if you do not want the Mac to switch networks.
+AUTO_SWITCH_MAC_WIFI = os.environ.get("LICHESS_AUTO_WIFI", "1").strip().lower() not in ("0", "false", "no")
 
 EVQ = queue.Queue()
 
@@ -325,7 +342,7 @@ class Lichess:
 class App:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5.2")
+        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5.3")
         self.sc = pygame.display.set_mode((W,H))
         self.clock = pygame.time.Clock()
         self.f24 = pygame.font.SysFont("Arial",24,bold=True)
@@ -385,6 +402,10 @@ class App:
         self.network_state = "checking"
         self.network_latency = None
         self.network_detail = "Checking Lichess..."
+        self.current_ssid = "—"
+        self.wifi_device = None
+        self.wifi_auto_state = "starting"
+        self.wifi_last_target = None
         threading.Thread(target=self.login, daemon=True).start()
         self.refresh_network()
 
@@ -400,11 +421,222 @@ class App:
         except Exception as e:
             EVQ.put(("status", f"Login failed: {e}"))
 
+    def _run_cmd(self, args, timeout=8):
+        try:
+            p = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
+        except Exception as e:
+            return 999, "", str(e)
+
+    def _mac_wifi_device(self):
+        if sys.platform != "darwin":
+            return None
+        rc, out, _ = self._run_cmd(["networksetup", "-listallhardwareports"])
+        if rc != 0:
+            return None
+        lines = out.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip() in ("Hardware Port: Wi-Fi", "Hardware Port: AirPort"):
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    if lines[j].startswith("Device:"):
+                        return lines[j].split(":", 1)[1].strip()
+        return None
+
+    def _mac_current_ssid(self, device=None):
+        if sys.platform != "darwin":
+            return None
+        device = device or self.wifi_device or self._mac_wifi_device()
+        if not device:
+            return None
+        rc, out, _ = self._run_cmd(
+            ["networksetup", "-getairportnetwork", device],
+            timeout=5,
+        )
+        if rc != 0:
+            return None
+        # Typical result: "Current Wi-Fi Network: SSID"
+        if ":" in out:
+            ssid = out.split(":", 1)[1].strip()
+            if ssid and "not associated" not in ssid.lower():
+                return ssid
+        return None
+
+    def _mac_scan_ssids(self):
+        """Best-effort scan; returns None when the current macOS has no usable airport CLI."""
+        if sys.platform != "darwin":
+            return None
+        candidates = [
+            "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport",
+            "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/A/Resources/airport",
+        ]
+        airport = next((x for x in candidates if os.path.exists(x)), None)
+        if not airport:
+            return None
+        rc, out, _ = self._run_cmd([airport, "-s"], timeout=8)
+        if rc != 0 or not out:
+            return None
+
+        found = set()
+        # `airport -s` is column-based. Match our exact known SSIDs in each line
+        # rather than trying to parse every macOS formatting variant.
+        for line in out.splitlines():
+            for profile in KNOWN_WIFI_PROFILES:
+                ssid = profile["ssid"]
+                if ssid in line:
+                    found.add(ssid)
+        return found
+
+    def _mac_connect_profile(self, profile):
+        if sys.platform != "darwin":
+            return False, "not macOS"
+        device = self.wifi_device or self._mac_wifi_device()
+        if not device:
+            return False, "Wi-Fi device not found"
+
+        ssid = profile["ssid"]
+        password = _wifi_secret(profile["password_b64"])
+        rc, out, err = self._run_cmd(
+            ["networksetup", "-setairportnetwork", device, ssid, password],
+            timeout=18,
+        )
+        # Do not retain an extra plaintext reference longer than needed.
+        password = None
+        if rc != 0:
+            return False, err or out or f"networksetup returned {rc}"
+
+        # Give macOS a moment to associate and verify the actual current SSID.
+        for _ in range(8):
+            time.sleep(0.35)
+            current = self._mac_current_ssid(device)
+            if current == ssid:
+                return True, ssid
+        return False, "association was not confirmed"
+
+    def _choose_known_wifi(self, visible_ssids):
+        """Return the highest-priority built-in network that is visible."""
+        if not visible_ssids:
+            return None
+        for p in sorted(KNOWN_WIFI_PROFILES, key=lambda x: x["priority"]):
+            if p["ssid"] in visible_ssids:
+                return p
+        return None
+
+    def auto_connect_known_wifi(self):
+        """Follow the requested priority order.
+
+        On macOS:
+        - scan if the legacy airport CLI is available;
+        - otherwise keep a working known network, or probe the profiles in order.
+
+        On the future ESP32 build the same selection policy maps directly to
+        Wi-Fi.scanNetworks() + WiFi.begin().
+        """
+        self.wifi_auto_state = "checking profiles"
+        self.wifi_device = self._mac_wifi_device()
+        current = self._mac_current_ssid(self.wifi_device)
+        if current:
+            self.current_ssid = current
+
+        if sys.platform != "darwin":
+            self.wifi_auto_state = "policy ready (ESP32 target)"
+            return {
+                "ssid": current,
+                "wifi_auto_state": self.wifi_auto_state,
+                "switched": False,
+            }
+
+        if not AUTO_SWITCH_MAC_WIFI:
+            self.wifi_auto_state = "auto-switch disabled"
+            return {
+                "ssid": current,
+                "wifi_auto_state": self.wifi_auto_state,
+                "switched": False,
+            }
+
+        visible = self._mac_scan_ssids()
+        if visible is not None:
+            target = self._choose_known_wifi(visible)
+            if target is None:
+                self.wifi_auto_state = "no built-in network visible"
+                return {
+                    "ssid": current,
+                    "wifi_auto_state": self.wifi_auto_state,
+                    "switched": False,
+                }
+
+            self.wifi_last_target = target["ssid"]
+            if current == target["ssid"]:
+                self.wifi_auto_state = f"connected · priority {target['priority']}"
+                return {
+                    "ssid": current,
+                    "wifi_auto_state": self.wifi_auto_state,
+                    "switched": False,
+                }
+
+            self.wifi_auto_state = f"connecting priority {target['priority']}..."
+            ok, detail = self._mac_connect_profile(target)
+            current = self._mac_current_ssid(self.wifi_device) or current
+            self.current_ssid = current or "—"
+            self.wifi_auto_state = (
+                f"connected · priority {target['priority']}"
+                if ok else f"connect failed · {detail[:34]}"
+            )
+            return {
+                "ssid": current,
+                "wifi_auto_state": self.wifi_auto_state,
+                "switched": ok,
+            }
+
+        # Fallback for newer macOS versions without `airport -s`.
+        # If already on any built-in network, do not disrupt it just to test
+        # whether a higher-priority SSID happens to be nearby.
+        known_by_name = {p["ssid"]: p for p in KNOWN_WIFI_PROFILES}
+        if current in known_by_name:
+            p = known_by_name[current]
+            self.wifi_auto_state = f"connected · priority {p['priority']} · scan unavailable"
+            return {
+                "ssid": current,
+                "wifi_auto_state": self.wifi_auto_state,
+                "switched": False,
+            }
+
+        # No scan and not currently on a built-in profile: try in strict order.
+        for target in sorted(KNOWN_WIFI_PROFILES, key=lambda x: x["priority"]):
+            self.wifi_last_target = target["ssid"]
+            self.wifi_auto_state = f"trying priority {target['priority']}..."
+            ok, _ = self._mac_connect_profile(target)
+            if ok:
+                current = target["ssid"]
+                self.current_ssid = current
+                self.wifi_auto_state = f"connected · priority {target['priority']}"
+                return {
+                    "ssid": current,
+                    "wifi_auto_state": self.wifi_auto_state,
+                    "switched": True,
+                }
+
+        self.wifi_auto_state = "no built-in network connected"
+        return {
+            "ssid": self._mac_current_ssid(self.wifi_device) or current,
+            "wifi_auto_state": self.wifi_auto_state,
+            "switched": False,
+        }
+
     def refresh_network(self):
         self.network_state = "checking"
-        self.network_detail = "Checking Lichess..."
+        self.network_detail = "Selecting known Wi-Fi, then checking Lichess..."
+        self.wifi_auto_state = "checking profiles"
         def work():
+            wifi = self.auto_connect_known_wifi()
             result = self.api.check_network()
+            result["ssid"] = wifi.get("ssid")
+            result["wifi_auto_state"] = wifi.get("wifi_auto_state")
+            result["wifi_switched"] = wifi.get("switched", False)
             EVQ.put(("network", result))
         threading.Thread(target=work, daemon=True).start()
 
@@ -1059,23 +1291,35 @@ class App:
         self.sc.fill(BG)
         self.sc.blit(self.txt("Network connection",self.f24),(18,15))
         self.button(pygame.Rect(390,12,72,30),"Home")
+
         col = GOOD if self.network_state=="online" else (HINT if self.network_state=="checking" else BAD)
-        pygame.draw.circle(self.sc,col,(38,86),9)
+        pygame.draw.circle(self.sc,col,(30,61),8)
         state = "Connected" if self.network_state=="online" else ("Checking..." if self.network_state=="checking" else "Disconnected")
-        self.sc.blit(self.txt(state,self.f18),(58,74))
-        self.sc.blit(self.txt("Lichess server",self.f15,MUTED),(18,120))
+        self.sc.blit(self.txt(state,self.f18),(48,50))
+        self.sc.blit(self.txt(f"Current Wi-Fi: {self.current_ssid}",self.f15,MUTED),(18,76))
+
+        self.sc.blit(self.txt("Built-in auto-connect priority",self.f15),(18,102))
+        y = 125
+        for profile in KNOWN_WIFI_PROFILES:
+            current = (self.current_ssid == profile["ssid"])
+            mark = "●" if current else "○"
+            col2 = GOOD if current else MUTED
+            self.sc.blit(
+                self.txt(f"{profile['priority']}. {mark} {profile['ssid']}",self.f15,col2),
+                (28,y)
+            )
+            y += 25
+
+        self.sc.blit(self.txt(f"Auto: {self.wifi_auto_state}",self.f12,MUTED),(18,202))
+
         latency = f"{self.network_latency} ms" if self.network_latency is not None else "—"
         cold = f"{self.network_cold_latency} ms" if self.network_cold_latency is not None else "—"
-        self.sc.blit(self.txt(f"Warm API TTFB: {latency}",self.f15),(18,143))
-        self.sc.blit(self.txt(f"Cold DNS/TCP/TLS/API: {cold}",self.f15,MUTED),(18,166))
+        self.sc.blit(self.txt(f"Lichess warm/cold: {latency} / {cold}",self.f12,MUTED),(18,222))
         move_rtt = f"{self.move_post_rtt_ms} ms" if self.move_post_rtt_ms is not None else "—"
         stream_rtt = f"{self.move_stream_confirm_ms} ms" if self.move_stream_confirm_ms is not None else "—"
-        self.sc.blit(self.txt(f"Last move POST: {move_rtt}   stream sync: {stream_rtt}",self.f15),(18,191))
-        acct=(self.api.account or {}).get("username","—")
-        self.sc.blit(self.txt(f"Account: {acct}   Token: {'loaded' if TOKEN else 'not set'}",self.f15),(18,216))
-        self.sc.blit(self.txt("Clock runs locally between authoritative Lichess updates.",self.f12,MUTED),(18,241))
-        self.sc.blit(self.txt("It is re-synced on every gameFull/gameState event.",self.f12,MUTED),(18,257))
-        self.button(pygame.Rect(18,272,210,36),"Retry connection",on=True)
+        self.sc.blit(self.txt(f"Move POST / sync: {move_rtt} / {stream_rtt}",self.f12,MUTED),(18,240))
+
+        self.button(pygame.Rect(18,272,210,36),"Auto-connect now",on=True)
         self.button(pygame.Rect(252,272,210,36),"Back")
 
     def draw_online_confirm(self):
@@ -1256,6 +1500,10 @@ class App:
                 except queue.Empty: break
                 if kind=="status": self.setstatus(data)
                 elif kind=="network":
+                    if data.get("ssid"):
+                        self.current_ssid=data.get("ssid")
+                    if data.get("wifi_auto_state"):
+                        self.wifi_auto_state=data.get("wifi_auto_state")
                     if data.get("online"):
                         self.network_state="online"
                         self.network_latency=data.get("latency")

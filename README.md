@@ -1,37 +1,45 @@
-# ESP32-C5 Lichess Handheld Simulator v5.2
+# ESP32-C5 Lichess Handheld Simulator v5.3
 
-## Clock / latency fixes
+## Built-in Wi-Fi profiles
 
-The chess clock now behaves like a real client clock:
+Three known networks are embedded in the requested strict priority order:
 
-- Every `gameFull` / `gameState` clock value from Lichess is treated as an authoritative snapshot.
-- Between snapshots, the active side counts down locally using `time.monotonic()`.
-- The display redraws at 30 FPS instead of waiting for another server event.
-- Under 20 seconds, the UI shows tenths of a second.
-- Every incoming game state re-syncs the local clock.
-- A small one-way network estimate is applied to the display after server snapshots.
-- Your own move is shown immediately (optimistic UI) instead of waiting for the server echo.
-- Fischer increment is applied locally, then corrected by the next authoritative state.
-- If Lichess rejects the move, the board and clock roll back safely.
+1. `REPLACE_WITH_YOUR_WIFI_SSID`
+2. `REPLACE_WITH_YOUR_WIFI_SSID`
+3. `REPLACE_WITH_YOUR_WIFI_SSID`
 
-## Streaming latency
+Passwords are embedded in the program but never displayed in the UI or logs.
 
-`requests.iter_lines()` now uses `chunk_size=1` for the Lichess NDJSON streams to minimize client-side buffering.
+### macOS simulator behavior
 
-## Diagnostics
+On launch and when **Auto-connect now** is pressed:
 
-The Network page now separates:
+- it detects the Mac Wi-Fi interface;
+- if the legacy macOS `airport -s` scanner exists, it scans and selects the highest-priority visible built-in SSID;
+- if scanning is unavailable on a newer macOS, it keeps a working known network instead of unnecessarily disrupting it;
+- if no known network is currently connected and scanning is unavailable, it tries the three profiles in priority order using `networksetup`;
+- only after Wi-Fi handling does it check Lichess connectivity.
 
-- **Warm API TTFB** — closer to normal in-game API response latency.
-- **Cold DNS/TCP/TLS/API** — first connection cost.
-- **Last move POST** — touch-to-HTTP-response time.
-- **stream sync** — touch-to-authoritative-gameState time.
-
-The old version measured a complete fresh GET of the Lichess homepage, so the number could look much larger than the actual in-game API latency.
-
-## Run
+To prevent the simulator from changing the Mac's Wi-Fi:
 
 ```bash
-export LICHESS_TOKEN='YOUR_TOKEN'
+export LICHESS_AUTO_WIFI=0
 python3.13 simulator.py
 ```
+
+### ESP32-C5 target behavior
+
+The exact same profile order is ready to map to:
+
+```text
+WiFi.scanNetworks()
+-> choose lowest priority number that is visible
+-> WiFi.begin(selected_ssid, selected_password)
+-> if connection fails, try the next known profile
+```
+
+## Security note
+
+The password strings are Base64-obfuscated inside `simulator.py` only to avoid casual display. Base64 is **not encryption**. Anyone with the source or sufficiently motivated access to the final firmware can recover embedded Wi-Fi passwords.
+
+All v5.2 features remain: continuous locally-interpolated chess clocks, authoritative Lichess re-sync, optimistic moves, puzzle navigation/hints/answers, online confirmation and latency diagnostics.
