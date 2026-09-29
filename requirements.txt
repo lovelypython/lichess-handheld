@@ -1,0 +1,3 @@
+pygame>=2.5
+python-chess>=1.999
+requests>=2.31
