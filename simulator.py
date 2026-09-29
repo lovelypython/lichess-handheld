@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, queue, threading, io, base64
+import os, sys, json, queue, threading, io, base64, time
 import requests
 import pygame
 import chess
@@ -23,6 +23,9 @@ LIGHT = (238, 238, 210)
 DARK = (118, 150, 86)
 LAST = (205, 210, 106)
 SEL = (246, 246, 105)
+HINT = (255, 183, 64)
+GOOD = (102, 187, 106)
+BAD = (239, 83, 80)
 
 # Cburnett chess pieces, embedded directly in this file.
 # Source: ndg6/staunton copy of Cburnett pieces; artwork is multi-licensed.
@@ -58,7 +61,7 @@ def load_piece_surfaces():
     return result
 
 def headers():
-    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.4"}
+    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.5"}
     if TOKEN:
         h["Authorization"] = f"Bearer {TOKEN}"
     return h
@@ -73,6 +76,22 @@ class Lichess:
         self.event_stop = threading.Event()
         self.game_stop = threading.Event()
         self.seek_stop = threading.Event()
+        self.seek_response = None
+
+    def check_network(self):
+        """Check basic Internet/Lichess reachability without consuming API state."""
+        t0 = time.monotonic()
+        try:
+            r = requests.get(
+                BASE + "/",
+                headers={"User-Agent": headers()["User-Agent"]},
+                timeout=8,
+                allow_redirects=True,
+            )
+            ms = int((time.monotonic() - t0) * 1000)
+            return {"online": r.status_code < 500, "latency": ms, "status": r.status_code}
+        except Exception as e:
+            return {"online": False, "latency": None, "error": str(e)}
 
     def get_account(self):
         if not TOKEN:
@@ -117,7 +136,9 @@ class Lichess:
 
     def seek(self, minutes, inc, rated=False):
         # Board API random seeks: Rapid/Classical/Correspondence only.
-        self.seek_stop.clear()
+        self.cancel_seek()
+        self.seek_stop = threading.Event()
+        stop = self.seek_stop
         def work():
             data = {
                 "time": minutes,
@@ -130,16 +151,31 @@ class Lichess:
                 with self.s.post(BASE + "/api/board/seek", data=data, stream=True,
                                  timeout=(15, None),
                                  headers={**headers(), "Accept":"application/x-ndjson"}) as r:
+                    self.seek_response = r
                     if r.status_code >= 400:
                         EVQ.put(("status", f"Seek failed {r.status_code}: {r.text[:120]}"))
                         return
                     for _ in r.iter_lines():
-                        if self.seek_stop.is_set():
+                        if stop.is_set():
                             break
-                EVQ.put(("status", "Seek finished."))
+                if not stop.is_set():
+                    EVQ.put(("status", "Seek finished."))
             except Exception as e:
-                EVQ.put(("status", f"Seek error: {e}"))
+                if not stop.is_set():
+                    EVQ.put(("status", f"Seek error: {e}"))
+            finally:
+                self.seek_response = None
         threading.Thread(target=work, daemon=True).start()
+
+    def cancel_seek(self):
+        self.seek_stop.set()
+        r = self.seek_response
+        self.seek_response = None
+        if r is not None:
+            try:
+                r.close()
+            except Exception:
+                pass
 
     def start_game_stream(self, gid):
         self.game_stop.set()
@@ -175,27 +211,76 @@ class Lichess:
         threading.Thread(target=lambda: self.s.post(BASE + f"/api/board/game/{gid}/resign", timeout=15),
                          daemon=True).start()
 
-    def next_puzzle(self, difficulty="normal"):
+    def _fetch_puzzle(self, difficulty="normal", exclude_id=None):
+        """Fetch a puzzle, preferring the batch API so Next really advances."""
+        # Authenticated batch endpoint can return several unseen puzzles. Ask for
+        # three so we can avoid accidentally redisplaying the current one.
+        if TOKEN:
+            r = self.s.get(
+                BASE + "/api/puzzle/batch/mix",
+                params={"difficulty": difficulty, "nb": 3},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                items = data.get("puzzles") or []
+                for item in items:
+                    if (item.get("puzzle") or {}).get("id") != exclude_id:
+                        return item
+                if items:
+                    return items[0]
+            elif r.status_code not in (401,403):
+                r.raise_for_status()
+
+        # Anonymous / limited-scope fallback.
+        last = None
+        for _ in range(2):
+            r = requests.get(
+                BASE + "/api/puzzle/next",
+                params={"difficulty": difficulty},
+                headers={"User-Agent": headers()["User-Agent"]},
+                timeout=15,
+            )
+            r.raise_for_status()
+            last = r.json()
+            if (last.get("puzzle") or {}).get("id") != exclude_id:
+                break
+        return last
+
+    def next_puzzle(self, difficulty="normal", exclude_id=None):
         def work():
             try:
-                # If token lacks puzzle:read, retry anonymously.
-                r = self.s.get(BASE + "/api/puzzle/next",
-                               params={"difficulty":difficulty}, timeout=15)
-                if r.status_code in (401,403):
-                    r = requests.get(BASE + "/api/puzzle/next",
-                                     params={"difficulty":difficulty},
-                                     headers={"User-Agent": headers()["User-Agent"]},
-                                     timeout=15)
-                r.raise_for_status()
-                EVQ.put(("puzzle", r.json()))
+                item = self._fetch_puzzle(difficulty, exclude_id)
+                EVQ.put(("puzzle", item))
             except Exception as e:
-                EVQ.put(("status", f"Puzzle API: {e}"))
+                EVQ.put(("puzzle_error", f"Puzzle API: {e}"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def finish_puzzle_and_next(self, puzzle_id, win, difficulty="normal"):
+        """Record an unrated result when puzzle:write is available, then fetch next."""
+        def work():
+            try:
+                if TOKEN and puzzle_id:
+                    payload = {"solutions": [{"id": puzzle_id, "win": bool(win), "rated": False}]}
+                    r = self.s.post(
+                        BASE + "/api/puzzle/batch/mix",
+                        params={"nb": 0},
+                        json=payload,
+                        timeout=15,
+                    )
+                    # 401/403 simply means this token lacks puzzle:write; next still works.
+                    if r.status_code not in (200,401,403):
+                        r.raise_for_status()
+                item = self._fetch_puzzle(difficulty, puzzle_id)
+                EVQ.put(("puzzle", item))
+            except Exception as e:
+                EVQ.put(("puzzle_error", f"Next puzzle: {e}"))
         threading.Thread(target=work, daemon=True).start()
 
 class App:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v4")
+        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5")
         self.sc = pygame.display.set_mode((W,H))
         self.clock = pygame.time.Clock()
         self.f24 = pygame.font.SysFont("Arial",24,bold=True)
@@ -224,7 +309,17 @@ class App:
         self.puzzle_i = 0
         self.puzzle_color = chess.WHITE
         self.puzzle_meta = {}
+        self.puzzle_start_board = None
+        self.puzzle_answer_steps = []
+        self.puzzle_hint_square = None
+        self.puzzle_had_mistake = False
+        self.puzzle_answer_revealed = False
+        self.puzzle_loading = False
+        self.network_state = "checking"
+        self.network_latency = None
+        self.network_detail = "Checking Lichess..."
         threading.Thread(target=self.login, daemon=True).start()
+        self.refresh_network()
 
     def login(self):
         if not TOKEN:
@@ -238,6 +333,14 @@ class App:
         except Exception as e:
             EVQ.put(("status", f"Login failed: {e}"))
 
+    def refresh_network(self):
+        self.network_state = "checking"
+        self.network_detail = "Checking Lichess..."
+        def work():
+            result = self.api.check_network()
+            EVQ.put(("network", result))
+        threading.Thread(target=work, daemon=True).start()
+
     def txt(self, s, font=None, c=TEXT):
         return (font or self.f15).render(str(s), True, c)
 
@@ -250,7 +353,7 @@ class App:
 
     def setstatus(self,s): self.status=str(s)[:120]
 
-    def home(self): self.screen="home"; self.selected=None
+    def home(self): self.screen="home"; self.selected=None; self.puzzle_hint_square=None
 
     def start_ai(self):
         if not TOKEN:
@@ -268,7 +371,17 @@ class App:
         if not TOKEN:
             self.setstatus("Need LICHESS_TOKEN for online play.")
             return
+        if self.network_state != "online":
+            self.setstatus("Network is not connected to Lichess.")
+            self.screen = "network"
+            return
+        self.screen = "online_wait"
         self.api.seek(*self.online_time,self.online_rated)
+
+    def cancel_seek(self):
+        self.api.cancel_seek()
+        self.setstatus("Search cancelled.")
+        self.screen = "online"
 
     def start_gid(self,gid):
         self.game_id=gid
@@ -387,6 +500,54 @@ class App:
             )
         return b, solution
 
+    def _build_answer_steps(self, start_board, solution):
+        b = start_board.copy(stack=False)
+        out = []
+        for uci in solution:
+            m = chess.Move.from_uci(uci)
+            if m not in b.legal_moves:
+                out.append(f"? {uci}")
+                break
+            prefix = f"{b.fullmove_number}." if b.turn == chess.WHITE else f"{b.fullmove_number}..."
+            out.append(f"{prefix} {b.san(m)}")
+            b.push(m)
+        return out
+
+    def request_next_puzzle(self):
+        if self.puzzle_loading:
+            return
+        self.puzzle_loading = True
+        self.puzzle_hint_square = None
+        self.setstatus("Loading next puzzle...")
+        pid = self.puzzle_meta.get("id") if self.puzzle_meta else None
+        if pid:
+            solved = self.puzzle_i >= len(self.puzzle_solution) and not self.puzzle_had_mistake and not self.puzzle_answer_revealed
+            self.api.finish_puzzle_and_next(pid, solved, self.puzzle_diff)
+        else:
+            self.api.next_puzzle(self.puzzle_diff)
+
+    def show_puzzle_hint(self):
+        if self.puzzle_i >= len(self.puzzle_solution):
+            self.setstatus("Puzzle is already solved.")
+            return
+        try:
+            m = chess.Move.from_uci(self.puzzle_solution[self.puzzle_i])
+            if m not in self.board.legal_moves:
+                self.setstatus("Hint unavailable: puzzle state mismatch.")
+                return
+            self.puzzle_hint_square = m.from_square
+            piece = self.board.piece_at(m.from_square)
+            name = chess.piece_name(piece.piece_type).title() if piece else "piece"
+            self.setstatus(f"Hint: move the {name} on {chess.square_name(m.from_square)}.")
+        except Exception as e:
+            self.setstatus(f"Hint unavailable: {e}")
+
+    def show_puzzle_answer(self):
+        self.puzzle_answer_revealed = True
+        self.puzzle_hint_square = None
+        self.screen = "puzzle_answer"
+        self.setstatus("Answer revealed. This attempt will not count as solved.")
+
     def process_puzzle(self,d):
         try:
             p=d["puzzle"]; g=d["game"]
@@ -400,6 +561,12 @@ class App:
             self.puzzle_solution=solution
             self.puzzle_i=0
             self.puzzle_meta=p
+            self.puzzle_start_board=b.copy(stack=False)
+            self.puzzle_answer_steps=self._build_answer_steps(self.puzzle_start_board, solution)
+            self.puzzle_hint_square=None
+            self.puzzle_had_mistake=False
+            self.puzzle_answer_revealed=False
+            self.puzzle_loading=False
             self.last=None; self.selected=None
             self.screen="puzzle_game"
 
@@ -451,9 +618,12 @@ class App:
                 alternate_mate = probe.is_checkmate()
 
             if m.uci()!=exp and not alternate_mate:
-                self.setstatus("Not the puzzle move. Try again.")
+                self.puzzle_had_mistake = True
+                self.puzzle_hint_square = None
+                self.setstatus("Not the puzzle move. Try again, use Hint, or view Answer.")
                 return
 
+            self.puzzle_hint_square = None
             self.board.push(m); self.last=m
 
             if alternate_mate:
@@ -493,6 +663,8 @@ class App:
                 if sq==self.selected: col=SEL
                 r=pygame.Rect(dx*SQ,dy*SQ,SQ,SQ)
                 pygame.draw.rect(self.sc,col,r)
+                if self.screen == "puzzle_game" and sq == self.puzzle_hint_square:
+                    pygame.draw.rect(self.sc,HINT,r,4)
                 p=self.board.piece_at(sq)
                 if p:
                     key=("w" if p.color else "b")+{1:"p",2:"n",3:"b",4:"r",5:"q",6:"k"}[p.piece_type]
@@ -511,6 +683,15 @@ class App:
         self.sc.fill(BG)
         self.sc.blit(self.txt("Chess Handheld",self.f24),(18,16))
         self.sc.blit(self.txt("Mac simulator · future ESP32-C5 UI",self.f15,MUTED),(18,48))
+
+        # Clickable network status pill; this mirrors the future Wi-Fi status area.
+        net_rect = pygame.Rect(348,14,114,32)
+        net_col = GOOD if self.network_state=="online" else (HINT if self.network_state=="checking" else BAD)
+        pygame.draw.rect(self.sc,PANEL,net_rect,border_radius=8)
+        pygame.draw.circle(self.sc,net_col,(360,30),5)
+        label = "Online" if self.network_state=="online" else ("Checking" if self.network_state=="checking" else "Offline")
+        self.sc.blit(self.txt(label,self.f12),(370,22))
+
         cards=[
             (pygame.Rect(18,88,140,110),"Online","Random player"),
             (pygame.Rect(170,88,140,110),"AI","Level 1–8"),
@@ -520,6 +701,7 @@ class App:
             pygame.draw.rect(self.sc,PANEL,r,border_radius=12)
             self.sc.blit(self.txt(a,self.f18),(r.x+12,r.y+18))
             self.sc.blit(self.txt(b,self.f12,MUTED),(r.x+12,r.y+49))
+        self.button(pygame.Rect(322,216,140,34),"Network")
         self.sc.blit(self.txt(self.status,self.f12,MUTED),(18,280))
         acct=(self.api.account or {}).get("username","offline")
         self.sc.blit(self.txt(f"Account: {acct}",self.f12,MUTED),(18,300))
@@ -546,7 +728,7 @@ class App:
                 self.button(pygame.Rect(18+i*108,92,96,36),f"{o[0]}+{o[1]}",self.online_time==o)
             self.button(pygame.Rect(18,151,210,38),"Casual",not self.online_rated)
             self.button(pygame.Rect(252,151,210,38),"Rated",self.online_rated)
-            self.button(pygame.Rect(18,218,444,44),"Find opponent",enabled=bool(TOKEN),on=True)
+            self.button(pygame.Rect(18,218,444,44),"Review & Continue",enabled=bool(TOKEN),on=True)
         else:
             self.sc.blit(self.txt("Difficulty relative to your puzzle rating",self.f15,MUTED),(18,58))
             opts=["easiest","easier","normal","harder","hardest"]
@@ -555,6 +737,72 @@ class App:
             self.button(pygame.Rect(18,160,444,44),"Get next Lichess puzzle",on=True)
             self.sc.blit(self.txt("Works anonymously; puzzle:read gives account-aware selection.",self.f12,MUTED),(18,225))
         self.sc.blit(self.txt(self.status,self.f12,MUTED),(18,292))
+
+    def draw_network(self):
+        self.sc.fill(BG)
+        self.sc.blit(self.txt("Network connection",self.f24),(18,15))
+        self.button(pygame.Rect(390,12,72,30),"Home")
+        col = GOOD if self.network_state=="online" else (HINT if self.network_state=="checking" else BAD)
+        pygame.draw.circle(self.sc,col,(38,86),9)
+        state = "Connected" if self.network_state=="online" else ("Checking..." if self.network_state=="checking" else "Disconnected")
+        self.sc.blit(self.txt(state,self.f18),(58,74))
+        self.sc.blit(self.txt("Lichess server",self.f15,MUTED),(18,120))
+        latency = f"{self.network_latency} ms" if self.network_latency is not None else "—"
+        self.sc.blit(self.txt(f"Reachability: {state}   Latency: {latency}",self.f15),(18,143))
+        self.sc.blit(self.txt(f"Token: {'loaded' if TOKEN else 'not set'}",self.f15),(18,174))
+        acct=(self.api.account or {}).get("username","—")
+        self.sc.blit(self.txt(f"Account: {acct}",self.f15),(18,197))
+        self.sc.blit(self.txt("Mac prototype uses the Mac's current network.",self.f12,MUTED),(18,228))
+        self.sc.blit(self.txt("ESP32 version will replace this with Wi-Fi scan/connect.",self.f12,MUTED),(18,247))
+        self.button(pygame.Rect(18,272,210,36),"Retry connection",on=True)
+        self.button(pygame.Rect(252,272,210,36),"Back")
+
+    def draw_online_confirm(self):
+        self.sc.fill(BG)
+        self.sc.blit(self.txt("Confirm online match",self.f24),(18,15))
+        self.sc.blit(self.txt("Please check these settings before matchmaking.",self.f15,MUTED),(18,50))
+        pygame.draw.rect(self.sc,PANEL,pygame.Rect(18,80,444,144),border_radius=12)
+        self.sc.blit(self.txt("Time control",self.f15,MUTED),(36,98))
+        self.sc.blit(self.txt(f"{self.online_time[0]}+{self.online_time[1]}",self.f24),(36,119))
+        self.sc.blit(self.txt("Game type",self.f15,MUTED),(220,98))
+        self.sc.blit(self.txt("Rated" if self.online_rated else "Casual",self.f24),(220,119))
+        self.sc.blit(self.txt("Network",self.f15,MUTED),(36,166))
+        net = "Connected" if self.network_state=="online" else "Not connected"
+        self.sc.blit(self.txt(net,self.f18, GOOD if self.network_state=="online" else BAD),(36,187))
+        acct=(self.api.account or {}).get("username","—")
+        self.sc.blit(self.txt(f"Account: {acct}",self.f15),(220,177))
+        self.button(pygame.Rect(18,250,210,44),"Back")
+        self.button(pygame.Rect(252,250,210,44),"Confirm & Search",
+                    enabled=bool(TOKEN) and self.network_state=="online",on=True)
+
+    def draw_online_wait(self):
+        self.sc.fill(BG)
+        self.sc.blit(self.txt("Finding opponent...",self.f24),(18,28))
+        self.sc.blit(self.txt(f"{self.online_time[0]}+{self.online_time[1]}  ·  {'Rated' if self.online_rated else 'Casual'}",self.f18),(18,74))
+        self.sc.blit(self.txt("Waiting for Lichess Board API matchmaking",self.f15,MUTED),(18,112))
+        self.sc.blit(self.txt(self.status,self.f12,MUTED),(18,150))
+        self.button(pygame.Rect(18,232,444,46),"Cancel search")
+
+    def draw_puzzle_answer(self):
+        self.sc.fill(BG)
+        p=self.puzzle_meta
+        self.sc.blit(self.txt("Puzzle answer",self.f24),(18,14))
+        self.sc.blit(self.txt(f"#{p.get('id','')}  ·  rating {p.get('rating','?')}",self.f15,MUTED),(18,47))
+        self.sc.blit(self.txt("Full solution steps",self.f18),(18,78))
+
+        # Two columns if the line is long, keeping the 480×320 screen readable.
+        steps=self.puzzle_answer_steps
+        for i,step in enumerate(steps[:12]):
+            col=0 if i<6 else 1
+            row=i if i<6 else i-6
+            x=18 + col*225
+            y=112 + row*25
+            self.sc.blit(self.txt(f"{i+1}. {step}",self.f15),(x,y))
+        if len(steps)>12:
+            self.sc.blit(self.txt(f"+ {len(steps)-12} more plies",self.f12,MUTED),(18,262))
+        self.button(pygame.Rect(18,276,136,32),"Back to board")
+        self.button(pygame.Rect(172,276,136,32),"Hint")
+        self.button(pygame.Rect(326,276,136,32),"Next puzzle",on=True)
 
     def draw_game(self):
         self.draw_board()
@@ -585,8 +833,10 @@ class App:
             for chunk in [themes[i:i+19] for i in range(0,len(themes),19)][:3]:
                 self.sc.blit(self.txt(chunk,self.f12,MUTED),(x,y)); y+=16
             self.sc.blit(self.txt(f"{self.puzzle_i}/{len(self.puzzle_solution)} plies",self.f15),(x,181))
-            self.button(pygame.Rect(330,220,140,32),"Home")
-            self.button(pygame.Rect(330,260,140,32),"Next")
+            self.button(pygame.Rect(330,216,66,30),"Hint")
+            self.button(pygame.Rect(404,216,66,30),"Answer")
+            self.button(pygame.Rect(330,252,66,30),"Home")
+            self.button(pygame.Rect(404,252,66,30),"Next",enabled=not self.puzzle_loading)
         self.sc.blit(self.txt(self.status[:24],self.f12,MUTED),(330,302))
 
     def click(self,pos):
@@ -595,6 +845,14 @@ class App:
             if pygame.Rect(18,88,140,110).collidepoint(pos): self.screen="online"
             elif pygame.Rect(170,88,140,110).collidepoint(pos): self.screen="ai"
             elif pygame.Rect(322,88,140,110).collidepoint(pos): self.screen="puzzle"
+            elif pygame.Rect(322,216,140,34).collidepoint(pos) or pygame.Rect(348,14,114,32).collidepoint(pos): self.screen="network"
+
+        elif self.screen=="network":
+            if pygame.Rect(390,12,72,30).collidepoint(pos) or pygame.Rect(252,272,210,36).collidepoint(pos):
+                self.home()
+            elif pygame.Rect(18,272,210,36).collidepoint(pos):
+                self.refresh_network()
+
         elif self.screen in ("ai","online","puzzle"):
             if pygame.Rect(390,12,72,30).collidepoint(pos): self.home(); return
             if self.screen=="ai":
@@ -608,22 +866,40 @@ class App:
                     if pygame.Rect(18+i*108,92,96,36).collidepoint(pos): self.online_time=o
                 if pygame.Rect(18,151,210,38).collidepoint(pos): self.online_rated=False
                 if pygame.Rect(252,151,210,38).collidepoint(pos): self.online_rated=True
-                if pygame.Rect(18,218,444,44).collidepoint(pos): self.start_seek()
+                if pygame.Rect(18,218,444,44).collidepoint(pos): self.screen="online_confirm"
             else:
                 for i,o in enumerate(["easiest","easier","normal","harder","hardest"]):
                     if pygame.Rect(18+i*89,90,82,36).collidepoint(pos): self.puzzle_diff=o
                 if pygame.Rect(18,160,444,44).collidepoint(pos):
-                    self.setstatus("Loading puzzle...")
-                    self.api.next_puzzle(self.puzzle_diff)
-        elif self.screen in ("game","puzzle_game"):
-            if x<BOARD: self.click_board(x,y)
-            else:
-                if pygame.Rect(330,220,140,32).collidepoint(pos): self.home()
-                elif pygame.Rect(330,260,140,32).collidepoint(pos):
-                    if self.screen=="game": self.api.resign(self.game_id)
-                    else:
-                        self.setstatus("Loading next puzzle...")
+                    if not self.puzzle_loading:
+                        self.puzzle_loading=True
+                        self.setstatus("Loading puzzle...")
                         self.api.next_puzzle(self.puzzle_diff)
+
+        elif self.screen=="online_confirm":
+            if pygame.Rect(18,250,210,44).collidepoint(pos): self.screen="online"
+            elif pygame.Rect(252,250,210,44).collidepoint(pos): self.start_seek()
+
+        elif self.screen=="online_wait":
+            if pygame.Rect(18,232,444,46).collidepoint(pos): self.cancel_seek()
+
+        elif self.screen=="puzzle_answer":
+            if pygame.Rect(18,276,136,32).collidepoint(pos): self.screen="puzzle_game"
+            elif pygame.Rect(172,276,136,32).collidepoint(pos):
+                self.screen="puzzle_game"; self.show_puzzle_hint()
+            elif pygame.Rect(326,276,136,32).collidepoint(pos): self.request_next_puzzle()
+
+        elif self.screen in ("game","puzzle_game"):
+            if x<BOARD:
+                self.click_board(x,y)
+            elif self.screen=="game":
+                if pygame.Rect(330,220,140,32).collidepoint(pos): self.home()
+                elif pygame.Rect(330,260,140,32).collidepoint(pos): self.api.resign(self.game_id)
+            else:
+                if pygame.Rect(330,216,66,30).collidepoint(pos): self.show_puzzle_hint()
+                elif pygame.Rect(404,216,66,30).collidepoint(pos): self.show_puzzle_answer()
+                elif pygame.Rect(330,252,66,30).collidepoint(pos): self.home()
+                elif pygame.Rect(404,252,66,30).collidepoint(pos): self.request_next_puzzle()
 
     def run(self):
         run=True
@@ -632,21 +908,37 @@ class App:
                 try: kind,data=EVQ.get_nowait()
                 except queue.Empty: break
                 if kind=="status": self.setstatus(data)
+                elif kind=="network":
+                    if data.get("online"):
+                        self.network_state="online"
+                        self.network_latency=data.get("latency")
+                        self.network_detail=f"Lichess reachable · {self.network_latency} ms"
+                    else:
+                        self.network_state="offline"
+                        self.network_latency=None
+                        self.network_detail=data.get("error","Could not reach Lichess")
                 elif kind=="event": self.process_event(data)
                 elif kind=="start_gid": self.start_gid(data)
                 elif kind=="game": self.process_game(data)
                 elif kind=="puzzle": self.process_puzzle(data)
+                elif kind=="puzzle_error":
+                    self.puzzle_loading=False
+                    self.setstatus(data)
             for e in pygame.event.get():
                 if e.type==pygame.QUIT: run=False
                 elif e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE: run=False
                 elif e.type==pygame.MOUSEBUTTONDOWN and e.button==1: self.click(e.pos)
             if self.screen=="home": self.draw_home()
             elif self.screen in ("ai","online","puzzle"): self.draw_selector_screen(self.screen)
+            elif self.screen=="network": self.draw_network()
+            elif self.screen=="online_confirm": self.draw_online_confirm()
+            elif self.screen=="online_wait": self.draw_online_wait()
+            elif self.screen=="puzzle_answer": self.draw_puzzle_answer()
             else:
                 self.sc.fill((0,0,0)); self.draw_game()
             pygame.display.flip()
             self.clock.tick(30)
-        self.api.event_stop.set(); self.api.game_stop.set(); self.api.seek_stop.set()
+        self.api.event_stop.set(); self.api.game_stop.set(); self.api.cancel_seek()
         pygame.quit()
 
 if __name__=="__main__":
