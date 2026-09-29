@@ -1,25 +1,39 @@
-# ESP32-C5 Lichess Handheld Simulator v5.4
+# ESP32-C5 Lichess Handheld Simulator v5.5
 
-## Network latency measurement fix
+## Puzzle history behavior corrected
 
-v5.3 had a diagnostic bug: both the "cold" and "warm" probes used `stream=True`,
-then closed the tiny response without consuming it. That can prevent the HTTP
-connection from being returned to urllib3's pool, so the second request may perform
-another TCP/TLS setup and falsely look like another cold request.
+`< Prev` / `Next >` now means **actual played history only**.
 
-v5.4:
+- It never steps into a future solution move that has not happened yet.
+- At the live/latest position, `Next >` is disabled.
+- After pressing `< Prev`, `Next >` can move forward only as far as the latest move that actually occurred.
+- History review does not reveal the answer and does not change solving progress.
+- `Resume` returns to the exact live puzzle position.
+- The Answer page still prints the full solution as text, but no longer lets board-history navigation expose future moves.
 
-- fully consumes each tiny API response;
-- uses `Response.elapsed` for response-header timing;
-- performs 3 requests and reports the first as cold and the fastest subsequent sample as warm;
-- shows whether Python Requests is using a proxy;
-- separately measures a `trust_env=False` direct connection for comparison;
-- keeps the existing real move POST and Board API stream-sync measurements.
+## Two-stage Hint
 
-This makes it much easier to distinguish:
+Press Hint once:
 
-- local Wi-Fi problems;
-- proxy/VPN route latency;
-- DNS/TCP/TLS cold-start cost;
-- actual Lichess API response latency;
-- Board API event-stream latency.
+- highlights the piece that should move.
+
+Press Hint a second time:
+
+- keeps the source highlighted;
+- draws an arrow from source to destination.
+
+Hints reset automatically after a correct move.
+
+## Very fast move animation
+
+Moves no longer visually teleport.
+
+- duration: about **100 ms**
+- simulator: roughly **3 frames at 30 FPS**
+- smoothstep interpolation for a short, clean slide
+- your online moves animate immediately with optimistic UI
+- opponent/AI Board API moves animate when received
+- puzzle solver moves animate
+- the automatic puzzle reply waits for the first 100 ms animation, then also animates
+
+This timing is intentionally short for the future lower-refresh ESP32 display.

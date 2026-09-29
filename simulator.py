@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, queue, threading, io, base64, time, subprocess, re
+import os, sys, json, queue, threading, io, base64, time, subprocess, re, math
 from urllib.parse import urlsplit
 import requests
 import pygame
@@ -62,7 +62,7 @@ def load_piece_surfaces():
     return result
 
 def headers():
-    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.54"}
+    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.55"}
     if TOKEN:
         h["Authorization"] = f"Bearer {TOKEN}"
     return h
@@ -392,7 +392,7 @@ class Lichess:
 class App:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5.4")
+        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5.5")
         self.sc = pygame.display.set_mode((W,H))
         self.clock = pygame.time.Clock()
         self.f24 = pygame.font.SysFont("Arial",24,bold=True)
@@ -425,6 +425,16 @@ class App:
         self.pending_prev_board = None
         self.pending_prev_last = None
         self.pending_prev_clock = None
+
+        # Very short move animation: about 3 frames at the simulator's 30 FPS.
+        # This is deliberately fast so it still looks good on the lower-refresh embedded display.
+        self.anim_piece = None
+        self.anim_move = None
+        self.anim_start_mono = None
+        self.anim_duration = 0.10
+        self.server_moves = []
+        self.server_moves_initialized = False
+
         self.network_cold_latency = None
         self.account_id = ""
         self.ai_level = 3
@@ -439,6 +449,14 @@ class App:
         self.puzzle_start_board = None
         self.puzzle_answer_steps = []
         self.puzzle_hint_square = None
+        self.puzzle_hint_move = None
+        self.puzzle_hint_level = 0
+        # Only moves that have actually happened in this attempt go here.
+        # Prev/Next is strictly limited to this history and never reveals future solution plies.
+        self.puzzle_played_moves = []
+        self.puzzle_history_cursor = 0
+        self.puzzle_pending_reply = None
+        self.puzzle_pending_reply_due = None
         self.puzzle_had_mistake = False
         self.puzzle_answer_revealed = False
         self.puzzle_loading = False
@@ -751,6 +769,11 @@ class App:
         self.clock_sync_mono=None
         self.clock_last_sync_mono=None
         self.move_stream_confirm_ms=None
+        self.server_moves=[]
+        self.server_moves_initialized=False
+        self.anim_piece=None
+        self.anim_move=None
+        self.anim_start_mono=None
         self.api.start_game_stream(gid)
 
     def process_event(self,d):
@@ -771,16 +794,135 @@ class App:
             who=((ch.get("challenger") or {}).get("name") or "Someone")
             self.setstatus(f"Challenge from {who}")
 
+    def is_animating(self):
+        if self.anim_piece is None or self.anim_move is None or self.anim_start_mono is None:
+            return False
+        return (time.monotonic() - self.anim_start_mono) < self.anim_duration
+
+    def start_piece_animation(self, board_before, move, duration=None):
+        """Animate one piece from source to destination very quickly.
+
+        The board itself is already advanced to the destination position.
+        While the animation is active, draw_board hides the destination piece
+        and draws the moving piece between square centers.
+        """
+        if board_before is None or move is None:
+            return
+        piece = board_before.piece_at(move.from_square)
+        if piece is None:
+            return
+        self.anim_piece = piece
+        self.anim_move = move
+        self.anim_start_mono = time.monotonic()
+        if duration is not None:
+            self.anim_duration = max(0.04, float(duration))
+
+    def clear_animation_if_done(self):
+        if self.anim_piece is None:
+            return
+        if not self.is_animating():
+            self.anim_piece = None
+            self.anim_move = None
+            self.anim_start_mono = None
+
+    def reset_puzzle_hint(self):
+        self.puzzle_hint_square = None
+        self.puzzle_hint_move = None
+        self.puzzle_hint_level = 0
+
+    def _finish_puzzle_reply(self):
+        """Apply the already-known Lichess opponent reply after the first fast animation."""
+        if not self.puzzle_pending_reply:
+            return
+        uci = self.puzzle_pending_reply
+        self.puzzle_pending_reply = None
+        self.puzzle_pending_reply_due = None
+        try:
+            r = chess.Move.from_uci(uci)
+        except Exception:
+            self.setstatus(f"Puzzle reply parse error: {uci}")
+            return
+        if r not in self.board.legal_moves:
+            self.setstatus(f"Puzzle data mismatch: reply {uci} is illegal")
+            return
+
+        before = self.board.copy(stack=False)
+        self.board.push(r)
+        self.last = r
+        self.puzzle_i += 1
+        self.puzzle_played_moves.append(r.uci())
+        self.puzzle_history_cursor = len(self.puzzle_played_moves)
+        self.start_piece_animation(before, r)
+
+        if self.puzzle_i >= len(self.puzzle_solution):
+            self.setstatus("Solved! Tap Next Puz for another Lichess puzzle.")
+        elif self.board.turn != self.puzzle_color:
+            self.setstatus("Puzzle turn mismatch detected.")
+        else:
+            self.setstatus("Correct. Continue.")
+
+    def update_fast_motion(self):
+        """Advance tiny visual animations and delayed puzzle replies."""
+        was_animating = self.is_animating()
+        self.clear_animation_if_done()
+        if (
+            self.puzzle_pending_reply
+            and not self.is_animating()
+            and self.puzzle_pending_reply_due is not None
+            and time.monotonic() >= self.puzzle_pending_reply_due
+        ):
+            self._finish_puzzle_reply()
+
     def apply_moves(self,moves):
-        b=chess.Board()
-        last=None
-        for u in moves.split():
+        tokens = moves.split()
+        b = chess.Board()
+        last = None
+        valid = []
+        for u in tokens:
             try:
-                m=chess.Move.from_uci(u)
-                if m not in b.legal_moves: break
-                b.push(m); last=m
-            except: break
-        self.board=b; self.last=last
+                m = chess.Move.from_uci(u)
+                if m not in b.legal_moves:
+                    break
+                b.push(m)
+                last = m
+                valid.append(u)
+            except Exception:
+                break
+
+        animate_before = None
+        animate_move = None
+
+        if self.server_moves_initialized and valid[:len(self.server_moves)] == self.server_moves:
+            delta = valid[len(self.server_moves):]
+
+            # Normal opponent move: one new ply.
+            if len(delta) == 1 and delta[0] != self.pending_move_uci:
+                before = chess.Board()
+                for u in valid[:-1]:
+                    before.push(chess.Move.from_uci(u))
+                animate_before = before
+                animate_move = chess.Move.from_uci(delta[0])
+
+            # Very fast opponent response can arrive in the same state as the
+            # server echo of our optimistic move. Animate only the new opponent ply.
+            elif (
+                len(delta) == 2
+                and self.pending_move_uci
+                and delta[0] == self.pending_move_uci
+            ):
+                before = chess.Board()
+                for u in valid[:-1]:
+                    before.push(chess.Move.from_uci(u))
+                animate_before = before
+                animate_move = chess.Move.from_uci(delta[1])
+
+        self.board = b
+        self.last = last
+        self.server_moves = valid
+        self.server_moves_initialized = True
+
+        if animate_move is not None:
+            self.start_piece_animation(animate_before, animate_move)
 
     def estimated_one_way_ms(self):
         """Small display-only estimate of stream transit time.
@@ -994,16 +1136,17 @@ class App:
         return out
 
     def _puzzle_board_at_ply(self, ply):
-        """Return the puzzle start position advanced by exactly `ply` solution plies."""
+        """Rebuild only the move history that has actually happened in this attempt."""
         if self.puzzle_start_board is None:
             raise ValueError("Puzzle start board is unavailable")
-        ply = max(0, min(int(ply), len(self.puzzle_solution)))
+        limit = len(self.puzzle_played_moves)
+        ply = max(0, min(int(ply), limit))
         b = self.puzzle_start_board.copy(stack=False)
         last = None
-        for uci in self.puzzle_solution[:ply]:
+        for uci in self.puzzle_played_moves[:ply]:
             m = chess.Move.from_uci(uci)
             if m not in b.legal_moves:
-                raise ValueError(f"Review line mismatch at {uci}")
+                raise ValueError(f"Played-history mismatch at {uci}")
             b.push(m)
             last = m
         return b, last
@@ -1016,60 +1159,87 @@ class App:
             self.puzzle_saved_status = self.status
 
     def enter_puzzle_review(self, target_ply=None):
-        """Enter non-interactive solution review and optionally jump to a ply."""
-        if not self.puzzle_solution or self.puzzle_start_board is None:
-            self.setstatus("No puzzle line to review.")
+        """Review only plies that have already occurred; never reveal future solution moves."""
+        if self.puzzle_start_board is None:
             return
         self._save_live_puzzle_state_for_review()
-        self.puzzle_answer_revealed = True
-        self.puzzle_hint_square = None
         self.selected = None
+        self.reset_puzzle_hint()
         self.puzzle_review_mode = True
         if target_ply is None:
-            target_ply = self.puzzle_i
+            target_ply = len(self.puzzle_played_moves)
         self.set_puzzle_review_ply(target_ply)
         self.screen = "puzzle_game"
 
     def set_puzzle_review_ply(self, ply):
-        if not self.puzzle_solution or self.puzzle_start_board is None:
-            return
-        ply = max(0, min(int(ply), len(self.puzzle_solution)))
+        limit = len(self.puzzle_played_moves)
+        ply = max(0, min(int(ply), limit))
+        old_ply = self.puzzle_review_ply if self.puzzle_review_mode else limit
         try:
             b, last = self._puzzle_board_at_ply(ply)
         except Exception as e:
-            self.setstatus(f"Review failed: {e}")
+            self.setstatus(f"History review failed: {e}")
             return
+
+        # Forward one step through already-played history gets the same quick animation.
+        forward_move = None
+        forward_before = None
+        if ply == old_ply + 1 and old_ply < limit:
+            try:
+                forward_before, _ = self._puzzle_board_at_ply(old_ply)
+                forward_move = chess.Move.from_uci(self.puzzle_played_moves[old_ply])
+            except Exception:
+                forward_move = None
+
         self.board = b
         self.last = last
         self.selected = None
-        self.puzzle_hint_square = None
+        self.reset_puzzle_hint()
         self.puzzle_review_ply = ply
+        self.puzzle_history_cursor = ply
         self.my_color = self.puzzle_color
+
+        if forward_move is not None:
+            self.start_piece_animation(forward_before, forward_move)
+
         if ply == 0:
-            self.setstatus(f"Solution review: start position · 0/{len(self.puzzle_solution)}")
+            self.setstatus(f"Played history: start · 0/{limit}")
         else:
-            step = self.puzzle_answer_steps[ply-1] if ply-1 < len(self.puzzle_answer_steps) else self.puzzle_solution[ply-1]
-            self.setstatus(f"Solution review {ply}/{len(self.puzzle_solution)}: {step}")
+            uci = self.puzzle_played_moves[ply - 1]
+            self.setstatus(f"Played history {ply}/{limit}: {uci}")
 
     def puzzle_prev_step(self):
+        limit = len(self.puzzle_played_moves)
+        if limit <= 0:
+            self.setstatus("No previous played move yet.")
+            return
         if not self.puzzle_review_mode:
-            self.enter_puzzle_review(self.puzzle_i)
-        self.set_puzzle_review_ply(self.puzzle_review_ply - 1)
+            # "Previous" means one step before the actual current position.
+            self.enter_puzzle_review(limit - 1)
+        else:
+            self.set_puzzle_review_ply(self.puzzle_review_ply - 1)
 
     def puzzle_next_step(self):
+        limit = len(self.puzzle_played_moves)
         if not self.puzzle_review_mode:
-            self.enter_puzzle_review(self.puzzle_i)
+            # At the live position there is intentionally no future step to reveal.
+            self.setstatus("No later played move yet.")
+            return
+        if self.puzzle_review_ply >= limit:
+            self.setstatus("This is the latest move you have actually played.")
+            return
         self.set_puzzle_review_ply(self.puzzle_review_ply + 1)
 
     def resume_puzzle_from_review(self):
-        """Return to the exact live position that existed before step review."""
+        """Return to the exact live solving position; review never changes puzzle progress."""
         if self.puzzle_saved_board is not None:
             self.board = self.puzzle_saved_board.copy(stack=False)
             self.puzzle_i = self.puzzle_saved_i
             self.last = self.puzzle_saved_last
             self.setstatus(self.puzzle_saved_status or "Returned to puzzle.")
         self.puzzle_review_mode = False
-        self.puzzle_hint_square = None
+        self.puzzle_history_cursor = len(self.puzzle_played_moves)
+        self.reset_puzzle_hint()
         self.selected = None
         self.screen = "puzzle_game"
 
@@ -1077,7 +1247,9 @@ class App:
         if self.puzzle_loading:
             return
         self.puzzle_loading = True
-        self.puzzle_hint_square = None
+        self.puzzle_pending_reply = None
+        self.puzzle_pending_reply_due = None
+        self.reset_puzzle_hint()
         self.setstatus("Loading next puzzle...")
         pid = self.puzzle_meta.get("id") if self.puzzle_meta else None
         if pid:
@@ -1087,6 +1259,12 @@ class App:
             self.api.next_puzzle(self.puzzle_diff)
 
     def show_puzzle_hint(self):
+        if self.puzzle_review_mode:
+            self.setstatus("Resume the live puzzle before using Hint.")
+            return
+        if self.puzzle_pending_reply or self.board.turn != self.puzzle_color:
+            self.setstatus("Wait for the opponent reply.")
+            return
         if self.puzzle_i >= len(self.puzzle_solution):
             self.setstatus("Puzzle is already solved.")
             return
@@ -1095,10 +1273,30 @@ class App:
             if m not in self.board.legal_moves:
                 self.setstatus("Hint unavailable: puzzle state mismatch.")
                 return
-            self.puzzle_hint_square = m.from_square
+
+            # New expected move -> first hint.
+            if self.puzzle_hint_move != m.uci():
+                self.puzzle_hint_move = m.uci()
+                self.puzzle_hint_level = 0
+
             piece = self.board.piece_at(m.from_square)
             name = chess.piece_name(piece.piece_type).title() if piece else "piece"
-            self.setstatus(f"Hint: move the {name} on {chess.square_name(m.from_square)}.")
+
+            if self.puzzle_hint_level == 0:
+                # First press: source piece only.
+                self.puzzle_hint_level = 1
+                self.puzzle_hint_square = m.from_square
+                self.setstatus(
+                    f"Hint 1/2: move the {name} on {chess.square_name(m.from_square)}."
+                )
+            else:
+                # Second and later presses: exact arrow.
+                self.puzzle_hint_level = 2
+                self.puzzle_hint_square = m.from_square
+                self.setstatus(
+                    f"Hint 2/2: {chess.square_name(m.from_square)} → "
+                    f"{chess.square_name(m.to_square)}"
+                )
         except Exception as e:
             self.setstatus(f"Hint unavailable: {e}")
 
@@ -1123,7 +1321,11 @@ class App:
             self.puzzle_meta=p
             self.puzzle_start_board=b.copy(stack=False)
             self.puzzle_answer_steps=self._build_answer_steps(self.puzzle_start_board, solution)
-            self.puzzle_hint_square=None
+            self.reset_puzzle_hint()
+            self.puzzle_played_moves=[]
+            self.puzzle_history_cursor=0
+            self.puzzle_pending_reply=None
+            self.puzzle_pending_reply_due=None
             self.puzzle_had_mistake=False
             self.puzzle_answer_revealed=False
             self.puzzle_loading=False
@@ -1152,9 +1354,12 @@ class App:
         return (f,7-r) if self.my_color==chess.WHITE else (7-f,r)
 
     def click_board(self,x,y):
-        if self.screen=="puzzle_game" and self.puzzle_review_mode:
-            self.setstatus("Solution review is read-only. Use Prev/Next or Resume.")
+        if self.is_animating():
             return
+        if self.screen=="puzzle_game" and self.puzzle_review_mode:
+            self.setstatus("History review is read-only. Use Prev/Next or Resume.")
+            return
+
         sq=self.disp_to_sq(x//SQ,y//SQ)
         if self.selected is None:
             p=self.board.piece_at(sq)
@@ -1163,8 +1368,11 @@ class App:
                 if self.screen=="puzzle_game" and p.color!=self.puzzle_color: return
                 self.selected=sq
             return
+
         if sq==self.selected:
-            self.selected=None; return
+            self.selected=None
+            return
+
         p=self.board.piece_at(self.selected)
         promo=chess.QUEEN if p and p.piece_type==chess.PAWN and chess.square_rank(sq) in (0,7) else None
         m=chess.Move(self.selected,sq,promotion=promo)
@@ -1172,31 +1380,31 @@ class App:
             p2=self.board.piece_at(sq)
             self.selected=sq if p2 and p2.color==self.board.turn else None
             return
+
         self.selected=None
+
         if self.screen=="game":
             if self.board.turn!=self.my_color: return
             if self.pending_move_uci is not None:
                 self.setstatus("Previous move is still syncing.")
                 return
 
-            # Save the authoritative/local-interpolated state so a rejected
-            # move can be rolled back cleanly.
             now = time.monotonic()
             cur_w, cur_b = self.current_clocks()
             mover = self.board.turn
-            self.pending_prev_board = self.board.copy(stack=False)
+            before = self.board.copy(stack=False)
+
+            self.pending_prev_board = before.copy(stack=False)
             self.pending_prev_last = self.last
             self.pending_prev_clock = (cur_w, cur_b, mover, now)
             self.pending_move_uci = m.uci()
             self.pending_move_sent_mono = now
 
-            # Optimistic UI: show the move immediately instead of waiting up to
-            # a network round trip for Lichess to echo it back.
+            # Optimistic board + immediate very-fast animation.
             self.board.push(m)
             self.last = m
+            self.start_piece_animation(before, m)
 
-            # Freeze mover and start opponent immediately. Apply Fischer
-            # increment locally; the next gameState will correct any difference.
             if cur_w is not None and cur_b is not None:
                 if mover == chess.WHITE:
                     cur_w += self.winc
@@ -1206,73 +1414,135 @@ class App:
 
             self.setstatus(f"Sending {m.uci()}…")
             self.api.move(self.game_id,m.uci())
-        else:
-            exp=self.puzzle_solution[self.puzzle_i] if self.puzzle_i<len(self.puzzle_solution) else None
+            return
 
-            # Lichess allows alternate mating moves in mate-in-1 puzzles.
-            alternate_mate = False
-            if m.uci()!=exp and "mateIn1" in self.puzzle_meta.get("themes", []):
-                probe = self.board.copy(stack=False)
-                probe.push(m)
-                alternate_mate = probe.is_checkmate()
+        # ----- puzzle live solving -----
+        if self.puzzle_pending_reply:
+            return
 
-            if m.uci()!=exp and not alternate_mate:
-                self.puzzle_had_mistake = True
-                self.puzzle_hint_square = None
-                self.setstatus("Not the puzzle move. Try again, use Hint, or view Answer.")
-                return
+        exp=self.puzzle_solution[self.puzzle_i] if self.puzzle_i<len(self.puzzle_solution) else None
+        alternate_mate = False
+        if m.uci()!=exp and "mateIn1" in self.puzzle_meta.get("themes", []):
+            probe = self.board.copy(stack=False)
+            probe.push(m)
+            alternate_mate = probe.is_checkmate()
 
-            self.puzzle_hint_square = None
-            self.board.push(m); self.last=m
+        if m.uci()!=exp and not alternate_mate:
+            self.puzzle_had_mistake = True
+            self.reset_puzzle_hint()
+            self.setstatus("Not the puzzle move. Try again, use Hint, or view Answer.")
+            return
 
-            if alternate_mate:
-                self.puzzle_i=len(self.puzzle_solution)
-                self.setstatus("Solved! Checkmate.")
-                return
+        before = self.board.copy(stack=False)
+        self.reset_puzzle_hint()
+        self.board.push(m)
+        self.last=m
+        self.start_piece_animation(before, m)
+        self.puzzle_played_moves.append(m.uci())
+        self.puzzle_history_cursor = len(self.puzzle_played_moves)
 
-            self.puzzle_i+=1
+        if alternate_mate:
+            self.puzzle_i=len(self.puzzle_solution)
+            self.setstatus("Solved! Checkmate.")
+            return
 
-            # The solution alternates player move / opponent reply.
-            # Play exactly one opponent reply, then return control to solver.
-            if self.puzzle_i<len(self.puzzle_solution):
-                r=chess.Move.from_uci(self.puzzle_solution[self.puzzle_i])
-                if r not in self.board.legal_moves:
-                    self.setstatus(
-                        f"Puzzle data mismatch: reply {r.uci()} is illegal"
-                    )
-                    return
-                self.board.push(r); self.last=r; self.puzzle_i+=1
+        self.puzzle_i+=1
 
-            if self.puzzle_i>=len(self.puzzle_solution):
-                self.setstatus("Solved! Tap Next for another Lichess puzzle.")
-            else:
-                # Defensive check: after the automatic reply it should be
-                # the solver's color again.
-                if self.board.turn != self.puzzle_color:
-                    self.setstatus("Puzzle turn mismatch detected.")
-                else:
-                    self.setstatus("Correct. Continue.")
+        # Do not teleport the opponent response on top of our animation.
+        # Queue it for ~100 ms later, then animate that reply too.
+        if self.puzzle_i<len(self.puzzle_solution):
+            self.puzzle_pending_reply = self.puzzle_solution[self.puzzle_i]
+            self.puzzle_pending_reply_due = time.monotonic() + self.anim_duration
+            self.setstatus("Correct…")
+            return
+
+        self.setstatus("Solved! Tap Next Puz for another Lichess puzzle.")
 
     def draw_board(self):
+        animating = self.is_animating()
+        anim_dest = self.anim_move.to_square if animating and self.anim_move else None
+
         for dy in range(8):
             for dx in range(8):
                 sq=self.disp_to_sq(dx,dy)
                 col=LIGHT if (dx+dy)%2==0 else DARK
-                if self.last and sq in (self.last.from_square,self.last.to_square): col=LAST
-                if sq==self.selected: col=SEL
+                if self.last and sq in (self.last.from_square,self.last.to_square):
+                    col=LAST
+                if sq==self.selected:
+                    col=SEL
+
                 r=pygame.Rect(dx*SQ,dy*SQ,SQ,SQ)
                 pygame.draw.rect(self.sc,col,r)
-                if self.screen == "puzzle_game" and sq == self.puzzle_hint_square:
+
+                # First hint: highlight only the piece's source square.
+                if (
+                    self.screen=="puzzle_game"
+                    and self.puzzle_hint_level>=1
+                    and sq==self.puzzle_hint_square
+                ):
                     pygame.draw.rect(self.sc,HINT,r,4)
-                p=self.board.piece_at(sq)
-                if p:
-                    key=("w" if p.color else "b")+{1:"p",2:"n",3:"b",4:"r",5:"q",6:"k"}[p.piece_type]
+
+                piece=self.board.piece_at(sq)
+                # Board is already at the post-move state. Hide the destination
+                # piece briefly while the same piece is being drawn in motion.
+                if piece and not (animating and sq==anim_dest):
+                    key=("w" if piece.color else "b")+{1:"p",2:"n",3:"b",4:"r",5:"q",6:"k"}[piece.piece_type]
                     self.sc.blit(self.pieces[key],self.pieces[key].get_rect(center=r.center))
+
+        # Legal move dots.
         if self.selected is not None:
             for m in self.board.legal_moves:
                 if m.from_square==self.selected:
                     dx,dy=self.sq_to_disp(m.to_square)
                     pygame.draw.circle(self.sc,(55,55,55),(dx*SQ+20,dy*SQ+20),5)
+
+        # Second hint: draw a clear source -> destination arrow.
+        if (
+            self.screen=="puzzle_game"
+            and self.puzzle_hint_level>=2
+            and self.puzzle_hint_move
+            and not self.puzzle_review_mode
+        ):
+            try:
+                hm=chess.Move.from_uci(self.puzzle_hint_move)
+                fx,fy=self.sq_to_disp(hm.from_square)
+                tx,ty=self.sq_to_disp(hm.to_square)
+                x1,y1=fx*SQ+20,fy*SQ+20
+                x2,y2=tx*SQ+20,ty*SQ+20
+                vx,vy=x2-x1,y2-y1
+                length=max(1.0, math.hypot(vx,vy))
+                ux,uy=vx/length,vy/length
+                # Stop a few pixels before the destination center.
+                ex,ey=x2-ux*8,y2-uy*8
+                overlay=pygame.Surface((BOARD,BOARD),pygame.SRCALPHA)
+                arrow_col=(*HINT,215)
+                pygame.draw.line(overlay,arrow_col,(x1,y1),(ex,ey),5)
+                px,py=-uy,ux
+                head=11
+                wing=6
+                pts=[
+                    (x2,y2),
+                    (ex-ux*head+px*wing,ey-uy*head+py*wing),
+                    (ex-ux*head-px*wing,ey-uy*head-py*wing),
+                ]
+                pygame.draw.polygon(overlay,arrow_col,pts)
+                self.sc.blit(overlay,(0,0))
+            except Exception:
+                pass
+
+        # Fast piece slide (~100 ms, ~3 frames at 30 FPS).
+        if animating and self.anim_piece and self.anim_move:
+            t=(time.monotonic()-self.anim_start_mono)/self.anim_duration
+            t=max(0.0,min(1.0,t))
+            # Smoothstep avoids a harsh mechanical start/stop without making it slow.
+            t=t*t*(3.0-2.0*t)
+            fx,fy=self.sq_to_disp(self.anim_move.from_square)
+            tx,ty=self.sq_to_disp(self.anim_move.to_square)
+            cx=(fx+(tx-fx)*t)*SQ+SQ/2
+            cy=(fy+(ty-fy)*t)*SQ+SQ/2
+            key=("w" if self.anim_piece.color else "b")+{1:"p",2:"n",3:"b",4:"r",5:"q",6:"k"}[self.anim_piece.piece_type]
+            surf=self.pieces[key]
+            self.sc.blit(surf,surf.get_rect(center=(int(cx),int(cy))))
 
     def fmt(self,ms):
         if ms is None: return "--:--"
@@ -1413,7 +1683,6 @@ class App:
         self.sc.blit(self.txt(f"#{p.get('id','')}  ·  rating {p.get('rating','?')}",self.f15,MUTED),(18,47))
         self.sc.blit(self.txt("Full solution steps",self.f18),(18,78))
 
-        # Two columns if the line is long, keeping the 480×320 screen readable.
         steps=self.puzzle_answer_steps
         for i,step in enumerate(steps[:12]):
             col=0 if i<6 else 1
@@ -1423,9 +1692,10 @@ class App:
             self.sc.blit(self.txt(f"{i+1}. {step}",self.f15),(x,y))
         if len(steps)>12:
             self.sc.blit(self.txt(f"+ {len(steps)-12} more plies",self.f12,MUTED),(18,262))
-        self.button(pygame.Rect(18,276,136,32),"Back to board")
-        self.button(pygame.Rect(172,276,136,32),"View line",on=True)
-        self.button(pygame.Rect(326,276,136,32),"Next puzzle",on=True)
+
+        # Answer reveals text only. Board Prev/Next remains strictly played-history-only.
+        self.button(pygame.Rect(18,276,210,32),"Back to board")
+        self.button(pygame.Rect(252,276,210,32),"Next puzzle",on=True)
 
     def draw_game(self):
         self.draw_board()
@@ -1461,20 +1731,23 @@ class App:
             y=116
             for chunk in [themes[i:i+19] for i in range(0,len(themes),19)][:3]:
                 self.sc.blit(self.txt(chunk,self.f12,MUTED),(x,y)); y+=16
-            shown_ply = self.puzzle_review_ply if self.puzzle_review_mode else self.puzzle_i
-            label = "Review" if self.puzzle_review_mode else "Progress"
-            self.sc.blit(self.txt(f"{label} {shown_ply}/{len(self.puzzle_solution)}",self.f15),(x,181))
+            played=len(self.puzzle_played_moves)
+            shown_ply = self.puzzle_review_ply if self.puzzle_review_mode else played
+            label = "History" if self.puzzle_review_mode else "Played"
+            self.sc.blit(self.txt(f"{label} {shown_ply}/{played}",self.f15),(x,181))
 
             if self.puzzle_review_mode:
                 self.button(pygame.Rect(330,210,66,28),"< Prev",enabled=self.puzzle_review_ply>0)
-                self.button(pygame.Rect(404,210,66,28),"Next >",enabled=self.puzzle_review_ply<len(self.puzzle_solution))
+                self.button(pygame.Rect(404,210,66,28),"Next >",enabled=self.puzzle_review_ply<played)
                 self.button(pygame.Rect(330,244,66,28),"Resume")
                 self.button(pygame.Rect(404,244,66,28),"Answer")
             else:
-                self.button(pygame.Rect(330,210,66,28),"Hint")
+                hint_label="Hint 2" if self.puzzle_hint_level==1 else ("Arrow" if self.puzzle_hint_level>=2 else "Hint")
+                self.button(pygame.Rect(330,210,66,28),hint_label)
                 self.button(pygame.Rect(404,210,66,28),"Answer")
-                self.button(pygame.Rect(330,244,66,28),"< Prev",enabled=self.puzzle_i>0)
-                self.button(pygame.Rect(404,244,66,28),"Next >",enabled=bool(self.puzzle_solution))
+                self.button(pygame.Rect(330,244,66,28),"< Prev",enabled=played>0)
+                # At live position, Next must never reveal a move that has not happened.
+                self.button(pygame.Rect(404,244,66,28),"Next >",enabled=False)
 
             self.button(pygame.Rect(330,278,66,28),"Home")
             self.button(pygame.Rect(404,278,66,28),"Next Puz",enabled=not self.puzzle_loading)
@@ -1525,10 +1798,8 @@ class App:
             if pygame.Rect(18,232,444,46).collidepoint(pos): self.cancel_seek()
 
         elif self.screen=="puzzle_answer":
-            if pygame.Rect(18,276,136,32).collidepoint(pos): self.screen="puzzle_game"
-            elif pygame.Rect(172,276,136,32).collidepoint(pos):
-                self.enter_puzzle_review(0)
-            elif pygame.Rect(326,276,136,32).collidepoint(pos): self.request_next_puzzle()
+            if pygame.Rect(18,276,210,32).collidepoint(pos): self.screen="puzzle_game"
+            elif pygame.Rect(252,276,210,32).collidepoint(pos): self.request_next_puzzle()
 
         elif self.screen in ("game","puzzle_game"):
             if x<BOARD:
@@ -1584,6 +1855,7 @@ class App:
                 elif kind=="puzzle_error":
                     self.puzzle_loading=False
                     self.setstatus(data)
+            self.update_fast_motion()
             for e in pygame.event.get():
                 if e.type==pygame.QUIT: run=False
                 elif e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE: run=False
