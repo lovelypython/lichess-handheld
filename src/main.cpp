@@ -1,18 +1,17 @@
 #include <Arduino.h>
 
 /*
- * ESP32-C5 + XPT2046 standalone raw-touch diagnostic
- *
- * Current wiring:
- *   XPT2046 T_CLK -> GPIO5
- *   XPT2046 T_DIN -> GPIO7   (ESP MOSI -> touch controller)
- *   XPT2046 T_DO  -> GPIO25  (touch controller -> ESP MISO)
- *   XPT2046 T_CS  -> GPIO1
- *   XPT2046 T_IRQ -> GPIO4
- *
- * LCD is intentionally NOT initialized.
- * This firmware tests the touch controller only.
- */
+  ESP32-C5 + XPT2046 standalone diagnostic v2
+
+  Touch wiring:
+    T_CLK -> GPIO5
+    T_DIN -> GPIO7
+    T_DO  -> GPIO25
+    T_CS  -> GPIO1
+    T_IRQ -> GPIO4
+
+  This firmware intentionally does NOT initialize the LCD.
+*/
 
 static constexpr int T_CLK = 5;
 static constexpr int T_DIN = 7;
@@ -20,54 +19,61 @@ static constexpr int T_DO  = 25;
 static constexpr int T_CS  = 1;
 static constexpr int T_IRQ = 4;
 
-static inline void clkHigh() {
-  digitalWrite(T_CLK, HIGH);
-  delayMicroseconds(3);
-}
-
-static inline void clkLow() {
-  digitalWrite(T_CLK, LOW);
-  delayMicroseconds(3);
-}
-
-static uint16_t xptRead12(uint8_t command) {
+static uint16_t read12(uint8_t command) {
   digitalWrite(T_CS, LOW);
 
-  // Send the 8-bit XPT2046 command, MSB first.
-  for (int bit = 7; bit >= 0; --bit) {
-    digitalWrite(T_DIN, (command >> bit) & 0x01);
-    clkHigh();
-    clkLow();
+  // 8-bit command, MSB first
+  for (int b = 7; b >= 0; --b) {
+    digitalWrite(T_DIN, (command >> b) & 1);
+    delayMicroseconds(2);
+    digitalWrite(T_CLK, HIGH);
+    delayMicroseconds(3);
+    digitalWrite(T_CLK, LOW);
+    delayMicroseconds(3);
   }
 
-  // Read the 16 clocks returned by XPT2046.
-  // The useful conversion result is the 12-bit value in bits 14..3.
-  uint16_t raw = 0;
-  for (int i = 0; i < 16; ++i) {
-    clkHigh();
-    raw = (raw << 1) | (digitalRead(T_DO) ? 1 : 0);
-    clkLow();
+  // One extra acquisition clock before sampling the conversion.
+  digitalWrite(T_CLK, HIGH);
+  delayMicroseconds(3);
+  digitalWrite(T_CLK, LOW);
+  delayMicroseconds(3);
+
+  uint16_t value = 0;
+  for (int i = 0; i < 12; ++i) {
+    digitalWrite(T_CLK, HIGH);
+    delayMicroseconds(3);
+
+    value <<= 1;
+    value |= digitalRead(T_DO) ? 1 : 0;
+
+    digitalWrite(T_CLK, LOW);
+    delayMicroseconds(3);
   }
 
   digitalWrite(T_CS, HIGH);
-  return (raw >> 3) & 0x0FFF;
+  return value & 0x0FFF;
 }
 
-static void printPinState() {
-  Serial.printf(
-    "[TOUCH] IRQ=%d  RAW_X=%4u  RAW_Y=%4u  DO=%d\n",
-    digitalRead(T_IRQ),
-    xptRead12(0xD0),   // X position command
-    xptRead12(0x90),   // Y position command
-    digitalRead(T_DO)
-  );
+static void printNumber(uint16_t n) {
+  Serial.print((unsigned int)n);
 }
 
 void setup() {
-  Serial.begin(115200);
+  // On ESP32-C5 with Hardware USB CDC, baud is not a real UART baud.
+  Serial.begin();
 
-  // Give native USB CDC a moment to enumerate.
-  delay(1500);
+  const uint32_t start = millis();
+  while (!Serial && (millis() - start < 4000)) {
+    delay(10);
+  }
+
+  delay(250);
+
+  Serial.println();
+  Serial.println("ASCII_SERIAL_OK_1234567890");
+  Serial.println("ESP32-C5 XPT2046 TEST V2");
+  Serial.println("If this text is readable, USB serial is working.");
+  Serial.println();
 
   pinMode(T_CLK, OUTPUT);
   pinMode(T_DIN, OUTPUT);
@@ -79,26 +85,39 @@ void setup() {
   digitalWrite(T_CLK, LOW);
   digitalWrite(T_DIN, LOW);
 
-  Serial.println();
-  Serial.println("==============================================");
-  Serial.println(" ESP32-C5 / XPT2046 STANDALONE TOUCH TEST");
-  Serial.println("==============================================");
-  Serial.println("T_CLK : GPIO5");
-  Serial.println("T_DIN : GPIO7");
-  Serial.println("T_DO  : GPIO25");
-  Serial.println("T_CS  : GPIO1");
-  Serial.println("T_IRQ : GPIO4");
-  Serial.println();
-  Serial.println("LCD is not used by this test.");
-  Serial.println("Touch the panel and move your finger.");
-  Serial.println("Expected:");
-  Serial.println("  - IRQ normally 1, pressed normally 0");
-  Serial.println("  - RAW_X / RAW_Y should change with finger position");
-  Serial.println("  - readings are forced even if IRQ is wrong/unconnected");
+  Serial.println("Pins:");
+  Serial.println("  CLK=5");
+  Serial.println("  DIN=7");
+  Serial.println("  DO=25");
+  Serial.println("  CS=1");
+  Serial.println("  IRQ=4");
   Serial.println();
 }
 
 void loop() {
-  printPinState();
-  delay(200);
+  static uint32_t last = 0;
+  static uint32_t counter = 0;
+
+  if (millis() - last >= 250) {
+    last = millis();
+    ++counter;
+
+    const int irqBefore = digitalRead(T_IRQ);
+    const uint16_t x = read12(0xD0);
+    delayMicroseconds(100);
+    const uint16_t y = read12(0x90);
+    const int doState = digitalRead(T_DO);
+
+    // Avoid printf here deliberately: plain ASCII Print API only.
+    Serial.print("HB=");
+    Serial.print(counter);
+    Serial.print(" IRQ=");
+    Serial.print(irqBefore);
+    Serial.print(" X=");
+    printNumber(x);
+    Serial.print(" Y=");
+    printNumber(y);
+    Serial.print(" DO=");
+    Serial.println(doState);
+  }
 }
