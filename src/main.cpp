@@ -129,10 +129,21 @@ struct SquareVisual {
 static SquareVisual boardVisual[64];
 static bool boardVisualValid[64]={false};
 static int renderedHintLevel=0,renderedHintFrom=-1,renderedHintTo=-1;
+static bool boardSceneIdentityValid=false,renderedBoardViewWhite=true;
+static String renderedBoardContext;
 
 static void invalidateBoardAll(){
   for(int i=0;i<64;i++)boardVisualValid[i]=false;
   renderedHintLevel=0;renderedHintFrom=renderedHintTo=-1;
+  boardSceneIdentityValid=false;
+}
+// A scene boundary means cached pixels from the previous logical board are not
+// reusable. Cancel any overlay animation and force all 64 squares to repaint.
+// Local moves/highlights never call this; they continue to use square dirties.
+static void beginBoardScene(const char* reason){
+  anim.active=false;
+  invalidateBoardAll();
+  Serial.printf("[LCD] full board refresh: %s\n",reason);
 }
 static void invalidateBoardSq(int sq){if(sq>=0&&sq<64)boardVisualValid[sq]=false;}
 static void invalidateDisplayRectOnBoard(int x,int y,int w,int h){
@@ -175,6 +186,13 @@ static void drawHintArrow(){
 }
 
 static void drawBoard(){
+  String context=screen==Screen::GAME?String("game:")+gameId:String("puzzle:")+puzzleId;
+  if(!boardSceneIdentityValid||renderedBoardContext!=context||renderedBoardViewWhite!=viewWhite){
+    for(int i=0;i<64;i++)boardVisualValid[i]=false;
+    renderedHintLevel=0;renderedHintFrom=renderedHintTo=-1;
+    renderedBoardContext=context;renderedBoardViewWhite=viewWhite;boardSceneIdentityValid=true;
+    Serial.printf("[LCD] board cache identity: %s orientation=%s\n",context.c_str(),viewWhite?"white":"black");
+  }
   bool legalDest[64]={false},legalCapture[64]={false};
   if(selectedSq>=0){
     ChessMove moves[256];int count=board.generateLegal(moves,256);
@@ -359,7 +377,7 @@ static Screen renderedScreen=Screen::HOME;
 static void redraw(){
   if(screenAsleep)return;
   bool screenChanged=!renderedScreenValid||renderedScreen!=screen;
-  if(screenChanged&&(screen==Screen::GAME||screen==Screen::PUZZLE_GAME))invalidateBoardAll();
+  if(screenChanged&&(screen==Screen::GAME||screen==Screen::PUZZLE_GAME))beginBoardScene("enter board screen");
   if(!screenChanged){
     if(screen==Screen::HOME){drawHomeDynamic();return;}
     if(screen==Screen::GAME){drawBoard();drawGameSide();return;}
@@ -373,7 +391,7 @@ static void redraw(){
 }
 
 static void sleepScreen(){if(screenAsleep)return;tft.sleep();digitalWrite(PIN_TFT_BL,LOW);screenAsleep=true;}
-static void wakeScreen(){if(screenAsleep){tft.wake();digitalWrite(PIN_TFT_BL,HIGH);screenAsleep=false;renderedScreenValid=false;invalidateBoardAll();redraw();}lastActivityMs=millis();}
+static void wakeScreen(){if(screenAsleep){tft.wake();digitalWrite(PIN_TFT_BL,HIGH);screenAsleep=false;renderedScreenValid=false;beginBoardScene("screen wake");redraw();}lastActivityMs=millis();}
 static void refreshNetworks(){screen=Screen::NETWORKS;networkPage=0;tft.fillScreen(C_BG);tft.drawText(18,24,"Scanning Wi-Fi...",C_TEXT,C_BG,2);wifiMgr.scan();redraw();}
 static void connectSelected(){
   tft.fillScreen(C_BG);tft.drawText(18,90,"Connecting to",C_MUTED,C_BG,1);tft.drawText(18,116,clip(selectedSSID,36),C_TEXT,C_BG,2);
@@ -397,15 +415,15 @@ static bool replayPGN(const String&pgn,int wanted,ChessBoard&out){
   return done==wanted;
 }
 
-static void rebuildPuzzle(int ply){board=puzzleStart;lastMove={};for(int i=0;i<ply;i++){ChessMove m;if(board.applyUCI(puzzlePlayed[i],&m))lastMove=m;}selectedSq=-1;}
 static void resetHint(){puzzleHintLevel=0;puzzleHintFrom=puzzleHintTo=-1;}
+static void rebuildPuzzle(int ply){beginBoardScene("puzzle history rebuild");resetHint();board=puzzleStart;lastMove={};for(int i=0;i<ply;i++){ChessMove m;if(board.applyUCI(puzzlePlayed[i],&m))lastMove=m;}selectedSq=-1;}
 static bool loadPuzzle(const String&json){
   JsonDocument doc;if(deserializeJson(doc,json)){statusText="Puzzle JSON parse failed";return false;}JsonObject p=doc["puzzle"],g=doc["game"];
   puzzleId=String((const char*)(p["id"]|""));puzzleRating=p["rating"]|0;puzzleThemes="";for(JsonVariant v:p["themes"].as<JsonArray>()){if(puzzleThemes.length())puzzleThemes+=",";puzzleThemes+=String((const char*)v);if(puzzleThemes.length()>40)break;}
   puzzleSolutionCount=0;for(JsonVariant v:p["solution"].as<JsonArray>())if(puzzleSolutionCount<32)puzzleSolution[puzzleSolutionCount++]=String((const char*)v);
   bool ok=false;const char*fen=p["fen"]|nullptr;if(fen&&*fen)ok=board.loadFEN(String(fen));else ok=replayPGN(String((const char*)(g["pgn"]|"")),int(p["initialPly"]|0)+1,board);
   if(!ok||!puzzleSolutionCount){statusText="Puzzle position parse failed";return false;}ChessMove first;if(!board.findLegal(ChessBoard::squareFromName(puzzleSolution[0][0],puzzleSolution[0][1]),ChessBoard::squareFromName(puzzleSolution[0][2],puzzleSolution[0][3]),puzzleSolution[0].length()>4?puzzleSolution[0][4]:0,first)){statusText="Puzzle position mismatch";return false;}
-  puzzleStart=board;puzzleWhite=board.whiteToMove();viewWhite=puzzleWhite;puzzleIndex=0;puzzlePlayedCount=0;puzzleHistoryPly=0;puzzleReview=false;puzzleMistake=false;puzzleAnswerShown=false;puzzleLoading=false;puzzleReplyPending=false;selectedSq=-1;lastMove={};resetHint();
+  beginBoardScene("new puzzle");puzzleStart=board;puzzleWhite=board.whiteToMove();viewWhite=puzzleWhite;puzzleIndex=0;puzzlePlayedCount=0;puzzleHistoryPly=0;puzzleReview=false;puzzleMistake=false;puzzleAnswerShown=false;puzzleLoading=false;puzzleReplyPending=false;selectedSq=-1;lastMove={};resetHint();
   ChessBoard a=board;for(int i=0;i<puzzleSolutionCount;i++){ChessMove m;if(!a.findLegal(ChessBoard::squareFromName(puzzleSolution[i][0],puzzleSolution[i][1]),ChessBoard::squareFromName(puzzleSolution[i][2],puzzleSolution[i][3]),puzzleSolution[i].length()>4?puzzleSolution[i][4]:0,m)){puzzleAnswer[i]="? "+puzzleSolution[i];break;}puzzleAnswer[i]=String(a.fullmoveNumber())+(a.whiteToMove()?". ":"... ")+a.san(m);a.apply(m);}
   screen=Screen::PUZZLE_GAME;statusText=String("Puzzle ")+puzzleId+" - "+(puzzleWhite?"White":"Black")+" to move";return true;
 }
@@ -423,14 +441,14 @@ static bool applyServerMoves(const String&moves){
 }
 
 static void startGame(const String&id){
-  gameId=id;board.reset();selectedSq=-1;lastMove={};viewWhite=true;myWhite=true;serverMoveCount=0;wtime=btime=-1;pendingUci="";opponent="-";screen=Screen::GAME;statusText="Opening game stream...";api.cancelSeek();api.startGameStream(id);redraw();
+  beginBoardScene("new game");gameId=id;board.reset();selectedSq=-1;lastMove={};viewWhite=true;myWhite=true;serverMoveCount=0;wtime=btime=-1;pendingUci="";opponent="-";screen=Screen::GAME;statusText="Opening game stream...";api.cancelSeek();api.startGameStream(id);redraw();
 }
 
 static void processGameJson(const String&json){
   JsonDocument doc;if(deserializeJson(doc,json))return;String type=String((const char*)(doc["type"]|""));JsonObject state;
   if(type=="gameFull"){
     JsonObject w=doc["white"],b=doc["black"];String wid=String((const char*)(w["id"]|"")),bid=String((const char*)(b["id"]|""));wid.toLowerCase();bid.toLowerCase();String aid=accountId;aid.toLowerCase();
-    myWhite=aid.length()?aid==wid:w["aiLevel"].isNull();if(viewWhite!=myWhite){viewWhite=myWhite;invalidateBoardAll();}JsonObject other=myWhite?b:w;const char* otherName=other["name"]|nullptr;if(!otherName||!*otherName)otherName=other["id"]|"Lichess AI";opponent=String(otherName);state=doc["state"];
+    myWhite=aid.length()?aid==wid:w["aiLevel"].isNull();if(viewWhite!=myWhite){viewWhite=myWhite;beginBoardScene("game orientation change");}JsonObject other=myWhite?b:w;const char* otherName=other["name"]|nullptr;if(!otherName||!*otherName)otherName=other["id"]|"Lichess AI";opponent=String(otherName);state=doc["state"];
   }else if(type=="gameState")state=doc.as<JsonObject>();else return;
   String moves=String((const char*)(state["moves"]|""));if(!applyServerMoves(moves)){statusText="Game move stream mismatch";return;}
   gameStatus=String((const char*)(state["status"]|"started"));wtime=state["wtime"]|-1;btime=state["btime"]|-1;winc=state["winc"]|0;binc=state["binc"]|0;clockSyncMs=millis();
@@ -444,7 +462,7 @@ static void processNetEvents(){
       case NetEventType::EVENT_JSON:{JsonDocument d;if(!deserializeJson(d,e->text)&&String((const char*)(d["type"]|""))=="gameStart")startGame(String((const char*)(d["game"]["id"]|"")));break;}
       case NetEventType::START_GAME:{JsonDocument d;if(!deserializeJson(d,e->text))startGame(String((const char*)(d["id"]|"")));else statusText="AI response parse failed";break;}
       case NetEventType::GAME_JSON:processGameJson(e->text);break;
-      case NetEventType::MOVE_RESULT:{movePostMs=e->elapsedMs;int nl=e->text.indexOf('\n');String u=nl>=0?e->text.substring(0,nl):e->text;if(e->code<200||e->code>=300){board=pendingBoard;lastMove=pendingLast;wtime=pendingWtime;btime=pendingBtime;clockSyncMs=pendingClockSync;pendingUci="";statusText=String("Move rejected HTTP ")+e->code;redraw(); }else{statusText=String("Move sent - ")+movePostMs+"ms";if(screen==Screen::GAME){drawGameTelemetry();drawGameStatus();}}break;}
+      case NetEventType::MOVE_RESULT:{movePostMs=e->elapsedMs;int nl=e->text.indexOf('\n');String u=nl>=0?e->text.substring(0,nl):e->text;if(e->code<200||e->code>=300){beginBoardScene("rejected move rollback");board=pendingBoard;lastMove=pendingLast;wtime=pendingWtime;btime=pendingBtime;clockSyncMs=pendingClockSync;pendingUci="";statusText=String("Move rejected HTTP ")+e->code;redraw(); }else{statusText=String("Move sent - ")+movePostMs+"ms";if(screen==Screen::GAME){drawGameTelemetry();drawGameStatus();}}break;}
       case NetEventType::PUZZLE_JSON:loadPuzzle(e->text);redraw();break;
       case NetEventType::STATUS:statusText=e->text;redraw();break;
       case NetEventType::ERROR:statusText=String("Network/API error ")+e->code+": "+clip(e->text,52);Serial.printf("[Lichess] error code=%d text=%s\n",e->code,e->text.c_str());if(e->code==401||e->code==403)loggedIn=false;redraw();break;
@@ -508,7 +526,7 @@ String serialLine;
 Wi-Fi credentials are configured locally and are not stored in this repository.
 
 void setup(){
-  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.11-touch-x-fix");Serial.printf("[LCD] logical=%dx%d MADCTL=0x%02X\n",SCREEN_W,SCREEN_H,ST7796_MADCTL);pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,PIN_TFT_CS);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
+  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.12-board-refresh-fix");Serial.printf("[LCD] logical=%dx%d MADCTL=0x%02X\n",SCREEN_W,SCREEN_H,ST7796_MADCTL);pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,PIN_TFT_CS);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
 Wi-Fi credentials are configured locally and are not stored in this repository.
   if(connected){statusText=String("Connected to ")+WiFi.SSID();screen=Screen::HOME;ensureApi();redraw();}else{statusText="Choose a Wi-Fi network";refreshNetworks();}lastActivityMs=millis();
 }
