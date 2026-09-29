@@ -26,8 +26,12 @@ static const uint16_t C_MUTED=ST7796Display::rgb565(184,184,184);
 static const uint16_t C_LIGHT=ST7796Display::rgb565(238,238,210);
 static const uint16_t C_DARK=ST7796Display::rgb565(118,150,86);
 static const uint16_t C_LAST=ST7796Display::rgb565(205,210,106);
-static const uint16_t C_SEL=ST7796Display::rgb565(246,246,105);
-static const uint16_t C_HINT=ST7796Display::rgb565(255,183,64);
+static const uint16_t C_SEL=ST7796Display::rgb565(255,224,48);
+static const uint16_t C_SEL_BORDER=ST7796Display::rgb565(255,112,0);
+static const uint16_t C_LEGAL=ST7796Display::rgb565(0,210,255);
+static const uint16_t C_CAPTURE=ST7796Display::rgb565(255,64,64);
+static const uint16_t C_MARK_EDGE=ST7796Display::rgb565(20,24,28);
+static const uint16_t C_HINT=ST7796Display::rgb565(255,145,0);
 static const uint16_t C_GOOD=ST7796Display::rgb565(102,187,106);
 static const uint16_t C_BAD=ST7796Display::rgb565(239,83,80);
 
@@ -107,18 +111,47 @@ static void drawPiecePixel(int px,int py,char p){
 }
 
 static void drawBoard(){
+  bool legalDest[64]={false},legalCapture[64]={false};
+  if(selectedSq>=0){
+    ChessMove moves[256];int count=board.generateLegal(moves,256);
+    for(int i=0;i<count;i++)if(moves[i].from==selectedSq){
+      int to=moves[i].to;legalDest[to]=true;
+      legalCapture[to]=legalCapture[to]||bool(moves[i].flags&MF_CAPTURE)||board.pieceAt(to)!=0;
+    }
+  }
   for(int dy=0;dy<8;dy++)for(int dx=0;dx<8;dx++){
     int sq=dispToSq(dx,dy);uint16_t c=((dx+dy)&1)?C_DARK:C_LIGHT;
     if(lastMove.valid()&&(sq==lastMove.from||sq==lastMove.to))c=C_LAST;
     if(sq==selectedSq)c=C_SEL;
     tft.fillRect(dx*40,dy*40,40,40,c);
-    if(puzzleHintLevel&&sq==puzzleHintFrom)tft.drawRect(dx*40+2,dy*40+2,36,36,C_HINT);
     if(!(anim.active&&sq==anim.to))drawPiecePixel(dx*40+2,dy*40+2,board.pieceAt(sq));
+  }
+  // Draw move markers over the pieces so they stay visible on every square.
+  for(int sq=0;sq<64;sq++)if(legalDest[sq]){
+    int dx,dy;sqToDisp(sq,dx,dy);int x=dx*40,y=dy*40;
+    if(legalCapture[sq]){
+      tft.drawRect(x+1,y+1,38,38,C_CAPTURE);
+      tft.drawRect(x+2,y+2,36,36,C_CAPTURE);
+      tft.drawRect(x+3,y+3,34,34,C_CAPTURE);
+    }else{
+      tft.fillCircle(x+20,y+20,8,C_MARK_EDGE);
+      tft.fillCircle(x+20,y+20,6,C_LEGAL);
+    }
+  }
+  if(selectedSq>=0){
+    int dx,dy;sqToDisp(selectedSq,dx,dy);int x=dx*40,y=dy*40;
+    tft.drawRect(x+1,y+1,38,38,C_SEL_BORDER);
+    tft.drawRect(x+2,y+2,36,36,C_SEL_BORDER);
+    tft.drawRect(x+3,y+3,34,34,C_SEL_BORDER);
+  }
+  if(puzzleHintLevel&&puzzleHintFrom>=0){
+    int dx,dy;sqToDisp(puzzleHintFrom,dx,dy);int x=dx*40,y=dy*40;
+    tft.drawRect(x+1,y+1,38,38,C_HINT);tft.drawRect(x+2,y+2,36,36,C_HINT);tft.drawRect(x+3,y+3,34,34,C_HINT);
   }
   if(puzzleHintLevel>=2&&puzzleHintFrom>=0&&puzzleHintTo>=0){
     int x0,y0,x1,y1;sqToDisp(puzzleHintFrom,x0,y0);sqToDisp(puzzleHintTo,x1,y1);
     x0=x0*40+20;y0=y0*40+20;x1=x1*40+20;y1=y1*40+20;
-    tft.drawLine(x0,y0,x1,y1,C_HINT);tft.fillCircle(x1,y1,4,C_HINT);
+    tft.drawLine(x0-1,y0,x1-1,y1,C_HINT);tft.drawLine(x0,y0,x1,y1,C_HINT);tft.drawLine(x0+1,y0,x1+1,y1,C_HINT);tft.fillCircle(x1,y1,7,C_HINT);
   }
 }
 
@@ -352,7 +385,7 @@ String serialLine;
 Wi-Fi credentials are configured locally and are not stored in this repository.
 
 void setup(){
-  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.4");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
+  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.5");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
 Wi-Fi credentials are configured locally and are not stored in this repository.
   if(connected){statusText=String("Connected to ")+WiFi.SSID();screen=Screen::HOME;ensureApi();redraw();}else{statusText="Choose a Wi-Fi network";refreshNetworks();}lastActivityMs=millis();
 }
