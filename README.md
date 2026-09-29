@@ -1,4 +1,4 @@
-# ESP32-C5 Lichess Handheld — hardware firmware v0.1
+# ESP32-C5 Lichess Handheld — hardware firmware v0.2
 
 Target:
 - Waveshare ESP32-C5-WIFI6-KIT-N32R8-UM
@@ -8,6 +8,9 @@ Target:
 This is the **first real hardware burn**. It intentionally concentrates on the hardware path that is physically connected right now:
 
 1. ST7796S display bring-up
+   - GPIO3-controlled backlight
+   - 60 s automatic sleep
+   - touch-to-wake
 2. XPT2046 touch + first-boot 3-point affine calibration
 3. 320×320 chessboard + 160×320 sidebar
 4. 100 ms piece-move animation
@@ -94,3 +97,29 @@ If the backlight is on but the LCD stays white, stop and send:
 - a photo of the wiring,
 - the serial log from boot,
 - whether the calibration targets ever appeared.
+
+
+## Screen sleep / backlight
+
+Unlike v0.1, **do not connect LED to 3V3**.
+
+Connect:
+
+```text
+MSP4021 LED -> ESP32-C5 GPIO3
+```
+
+The module already contains its own backlight transistor/driver. The firmware:
+- turns the ST7796S display off and enters sleep after 60 seconds without input;
+- drives GPIO3 LOW so the backlight is actually dark;
+- keeps XPT2046 alive;
+- uses the first touch only to wake the screen.
+
+Manual serial commands:
+
+```text
+screen sleep
+screen wake
+```
+
+The timeout is `SCREEN_IDLE_MS` in `include/config.h`; set it to `0` to disable automatic blanking.

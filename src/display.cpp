@@ -161,6 +161,21 @@ void ST7796Display::begin() {
   fillScreen(rgb565(16,18,22));
 }
 
+
+void ST7796Display::sleep() {
+  cmd(0x28);       // DISPOFF
+  delay(20);
+  cmd(0x10);       // SLPIN
+  delay(120);
+}
+
+void ST7796Display::wake() {
+  cmd(0x11);       // SLPOUT
+  delay(120);
+  cmd(0x29);       // DISPON
+  delay(20);
+}
+
 void ST7796Display::setWindow(int16_t x, int16_t y, int16_t w, int16_t h) {
   int16_t x1 = x + w - 1, y1 = y + h - 1;
   cmd(0x2A);

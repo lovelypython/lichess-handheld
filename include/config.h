@@ -13,18 +13,23 @@ static constexpr int PIN_SPI_MISO  = 9;
 static constexpr int PIN_TFT_CS    = 23;
 static constexpr int PIN_TFT_DC    = 24;
 static constexpr int PIN_TFT_RST   = 0;
+static constexpr int PIN_TFT_BL    = 3;   // MSP4021 LED = active-HIGH backlight control input
 
 static constexpr int PIN_TOUCH_CS  = 1;
 static constexpr int PIN_TOUCH_IRQ = 4;
 
-// Backlight is wired directly to 3V3 for the first hardware bring-up.
-// The LCD module VCC may be connected to 5V while the ESP32-C5 is USB-powered.
+// MSP4021 has an onboard backlight transistor. LED is a logic/PWM control input,
+// so it goes to GPIO3 rather than consuming the ESP board's only 3V3 header pin.
+// LCD module VCC goes to 5V while the ESP32-C5 is USB-powered.
 
 // 480 x 320 landscape.
 static constexpr int SCREEN_W = 480;
 static constexpr int SCREEN_H = 320;
 static constexpr uint32_t TFT_SPI_HZ = 30000000;
 static constexpr uint32_t TOUCH_SPI_HZ = 2000000;
+
+// Normal screen blanking. Touch IRQ remains alive and wakes the display.
+static constexpr uint32_t SCREEN_IDLE_MS = 60000;  // 60 s; set 0 to disable
 
 // ST7796 MADCTL. 0x28 = MV + BGR, common 480x320 landscape orientation.
 // If the image is mirrored on your exact panel, change this only; wiring stays the same.

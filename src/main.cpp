@@ -42,6 +42,32 @@ int ax0=0,ay0=0,ax1=0,ay1=0;
 uint32_t animStart=0;
 static constexpr uint32_t ANIM_MS=100;
 
+void redrawAll();
+
+bool screenAsleep=false;
+uint32_t lastActivityMs=0;
+
+void sleepScreen() {
+  if (screenAsleep) return;
+  tft.sleep();
+  digitalWrite(PIN_TFT_BL, LOW);
+  screenAsleep=true;
+  Serial.println("[Display] sleep");
+}
+
+void wakeScreen() {
+  if (!screenAsleep) {
+    lastActivityMs=millis();
+    return;
+  }
+  tft.wake();
+  digitalWrite(PIN_TFT_BL, HIGH);
+  screenAsleep=false;
+  lastActivityMs=millis();
+  redrawAll();
+  Serial.println("[Display] wake");
+}
+
 void drawFallbackPiece(int cx,int cy,char p) {
   bool white = isupper(p);
   char u=toupper(p);
@@ -116,7 +142,7 @@ void drawSidebar() {
   tft.drawText(330,243,"wifi add S|P",C_TEXT,C_PANEL,1);
   tft.drawText(330,256,"wifi reconnect",C_TEXT,C_PANEL,1);
   tft.drawText(330,269,"touch recalibrate",C_TEXT,C_PANEL,1);
-  tft.drawText(330,295,"HW bring-up v0.1",C_MUTED,C_PANEL,1);
+  tft.drawText(330,295,"HW bring-up v0.2",C_MUTED,C_PANEL,1);
 }
 
 void redrawAll(){drawBoard();drawSidebar();}
@@ -164,22 +190,25 @@ Wi-Fi credentials are configured locally and are not stored in this repository.
     return;
   }
   if(s=="wifi clear"){wifiMgr.clearExtra();Serial.println("Extra network cleared");return;}
-  if(s=="touch recalibrate"){touch.clearCalibration();touch.runCalibration(tft);redrawAll();return;}
+  if(s=="touch recalibrate"){wakeScreen();touch.clearCalibration();touch.runCalibration(tft);redrawAll();lastActivityMs=millis();return;}
+  if(s=="screen sleep"){sleepScreen();return;}
+  if(s=="screen wake"){wakeScreen();return;}
   if(s=="status"){
     Serial.printf("SSID=%s IP=%s RSSI=%d touch=%s\n",
       wifiMgr.currentSSID().c_str(),wifiMgr.ip().c_str(),wifiMgr.rssi(),
       touch.calibrated()?"calibrated":"not calibrated");
     return;
   }
-  Serial.println("Commands: wifi scan | wifi add SSID|PASSWORD | wifi reconnect | wifi clear | touch recalibrate | status");
+  Serial.println("Commands: wifi scan | wifi add SSID|PASSWORD | wifi reconnect | wifi clear | touch recalibrate | screen sleep | screen wake | status");
 }
 
 void setup(){
   Serial.begin(115200);
   delay(600);
-  Serial.println("\nESP32-C5 Lichess Handheld - hardware bring-up v0.1");
+  Serial.println("\nESP32-C5 Lichess Handheld - hardware bring-up v0.2");
 
   pinMode(PIN_TFT_CS,OUTPUT); digitalWrite(PIN_TFT_CS,HIGH);
+  pinMode(PIN_TFT_BL,OUTPUT); digitalWrite(PIN_TFT_BL,HIGH);
   pinMode(PIN_TOUCH_CS,OUTPUT); digitalWrite(PIN_TOUCH_CS,HIGH);
   displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);
 
@@ -196,23 +225,43 @@ void setup(){
   if(!touch.calibrated()) touch.runCalibration(tft);
 
   redrawAll();
+  lastActivityMs=millis();
   Serial.println("Ready. Type 'status' for diagnostics.");
 }
 
 uint32_t lastTouch=0;
 void loop(){
-  updateAnimation();
-
   while(Serial.available()){
     char c=Serial.read();
     if(c=='\n'||c=='\r'){
-      if(serialLine.length()){handleSerialCommand(serialLine);serialLine="";}
+      if(serialLine.length()){
+        // Any serial interaction wakes the UI first, except an explicit sleep request.
+        String cmd=serialLine; cmd.trim();
+        if(cmd!="screen sleep") wakeScreen();
+        handleSerialCommand(serialLine);
+        serialLine="";
+        lastActivityMs=millis();
+      }
     } else serialLine+=c;
   }
+
+  // Touch controller stays powered while ST7796S + backlight are asleep.
+  if(screenAsleep){
+    if(digitalRead(PIN_TOUCH_IRQ)==LOW){
+      wakeScreen();
+      while(digitalRead(PIN_TOUCH_IRQ)==LOW) delay(5); // first tap only wakes
+      lastTouch=millis();
+    }
+    delay(5);
+    return;
+  }
+
+  updateAnimation();
 
   if(!animating && millis()-lastTouch>120){
     TouchPoint p=touch.read();
     if(p.pressed){
+      lastActivityMs=millis();
       lastTouch=millis();
       if(p.x<320){
         int x=p.x/40,y=p.y/40;
@@ -225,6 +274,11 @@ void loop(){
         while(digitalRead(PIN_TOUCH_IRQ)==LOW)delay(5);
       }
     }
+  }
+
+  if(SCREEN_IDLE_MS>0 && millis()-lastActivityMs>=SCREEN_IDLE_MS){
+    sleepScreen();
+    return;
   }
 
   static uint32_t lastWifiPaint=0;
