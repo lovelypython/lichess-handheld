@@ -79,7 +79,7 @@ uint32_t movePostMs=0,moveStreamMs=0,pendingSentMs=0;
 ChessBoard pendingBoard;ChessMove pendingLast;
 int64_t pendingWtime=-1,pendingBtime=-1;uint32_t pendingClockSync=0;
 
-String puzzleId,puzzleThemes;
+String puzzleId,puzzleThemes,puzzleWrongMove;
 int puzzleRating=0,puzzleSolutionCount=0,puzzleIndex=0,puzzlePlayedCount=0,puzzleHistoryPly=0;
 String puzzleSolution[32],puzzlePlayed[64],puzzleAnswer[32];
 ChessBoard puzzleStart;
@@ -342,7 +342,10 @@ static void drawGameSide(bool force=false){
 }
 static void drawPuzzleSide(){
   tft.fillRect(320,0,160,320,C_PANEL);tft.drawText(330,10,"Puzzle",C_TEXT,C_PANEL,2);tft.drawText(330,45,clip(String("#")+puzzleId,23),C_MUTED,C_PANEL,1);tft.drawText(330,66,String("Rating ")+puzzleRating,C_TEXT,C_PANEL,2);tft.drawText(330,92,puzzleWhite?"White to move":"Black to move",C_TEXT,C_PANEL,1);
-  tft.drawText(330,116,clip(puzzleThemes,23),C_MUTED,C_PANEL,1);tft.drawText(330,181,String(puzzleReview?"History ":"Played ")+(puzzleReview?puzzleHistoryPly:puzzlePlayedCount)+"/"+puzzlePlayedCount,C_TEXT,C_PANEL,1);
+  if(puzzleWrongMove.length())tft.drawText(330,112,clip(String("X ")+puzzleWrongMove,23),C_BAD,C_PANEL,1);
+  tft.drawText(330,136,clip(puzzleThemes,23),C_MUTED,C_PANEL,1);
+  String progress=puzzleReview?String("History ")+puzzleHistoryPly+"/"+puzzlePlayedCount:String("Played ")+puzzlePlayedCount+"/"+puzzleSolutionCount;
+  tft.drawText(330,181,progress,C_TEXT,C_PANEL,1);
   if(puzzleReview){button({330,210,66,28},"< Prev",false,puzzleHistoryPly>0);button({404,210,66,28},"Next >",false,puzzleHistoryPly<puzzlePlayedCount);button({330,244,66,28},"Resume");button({404,244,66,28},"Answer");}
   else{button({330,210,66,28},puzzleHintLevel==0?"Hint":(puzzleHintLevel==1?"Hint 2":"Arrow"));button({404,210,66,28},"Answer");button({330,244,66,28},"< Prev",false,puzzlePlayedCount>0);button({404,244,66,28},"Next >",false,false);}
   button({330,278,66,28},"Home");button({404,278,66,28},"Next Puz",false,!puzzleLoading);tft.drawText(330,308,clip(statusText,24),C_MUTED,C_PANEL,1);
@@ -416,14 +419,14 @@ static bool replayPGN(const String&pgn,int wanted,ChessBoard&out){
 }
 
 static void resetHint(){puzzleHintLevel=0;puzzleHintFrom=puzzleHintTo=-1;}
-static void rebuildPuzzle(int ply){beginBoardScene("puzzle history rebuild");resetHint();board=puzzleStart;lastMove={};for(int i=0;i<ply;i++){ChessMove m;if(board.applyUCI(puzzlePlayed[i],&m))lastMove=m;}selectedSq=-1;}
+static void rebuildPuzzle(int ply){beginBoardScene("puzzle history rebuild");resetHint();puzzleWrongMove="";board=puzzleStart;lastMove={};for(int i=0;i<ply;i++){ChessMove m;if(board.applyUCI(puzzlePlayed[i],&m))lastMove=m;}selectedSq=-1;}
 static bool loadPuzzle(const String&json){
   JsonDocument doc;if(deserializeJson(doc,json)){statusText="Puzzle JSON parse failed";return false;}JsonObject p=doc["puzzle"],g=doc["game"];
   puzzleId=String((const char*)(p["id"]|""));puzzleRating=p["rating"]|0;puzzleThemes="";for(JsonVariant v:p["themes"].as<JsonArray>()){if(puzzleThemes.length())puzzleThemes+=",";puzzleThemes+=String((const char*)v);if(puzzleThemes.length()>40)break;}
   puzzleSolutionCount=0;for(JsonVariant v:p["solution"].as<JsonArray>())if(puzzleSolutionCount<32)puzzleSolution[puzzleSolutionCount++]=String((const char*)v);
   bool ok=false;const char*fen=p["fen"]|nullptr;if(fen&&*fen)ok=board.loadFEN(String(fen));else ok=replayPGN(String((const char*)(g["pgn"]|"")),int(p["initialPly"]|0)+1,board);
   if(!ok||!puzzleSolutionCount){statusText="Puzzle position parse failed";return false;}ChessMove first;if(!board.findLegal(ChessBoard::squareFromName(puzzleSolution[0][0],puzzleSolution[0][1]),ChessBoard::squareFromName(puzzleSolution[0][2],puzzleSolution[0][3]),puzzleSolution[0].length()>4?puzzleSolution[0][4]:0,first)){statusText="Puzzle position mismatch";return false;}
-  beginBoardScene("new puzzle");puzzleStart=board;puzzleWhite=board.whiteToMove();viewWhite=puzzleWhite;puzzleIndex=0;puzzlePlayedCount=0;puzzleHistoryPly=0;puzzleReview=false;puzzleMistake=false;puzzleAnswerShown=false;puzzleLoading=false;puzzleReplyPending=false;selectedSq=-1;lastMove={};resetHint();
+  beginBoardScene("new puzzle");puzzleStart=board;puzzleWhite=board.whiteToMove();viewWhite=puzzleWhite;puzzleIndex=0;puzzlePlayedCount=0;puzzleHistoryPly=0;puzzleReview=false;puzzleMistake=false;puzzleAnswerShown=false;puzzleLoading=false;puzzleReplyPending=false;puzzleWrongMove="";selectedSq=-1;lastMove={};resetHint();
   ChessBoard a=board;for(int i=0;i<puzzleSolutionCount;i++){ChessMove m;if(!a.findLegal(ChessBoard::squareFromName(puzzleSolution[i][0],puzzleSolution[i][1]),ChessBoard::squareFromName(puzzleSolution[i][2],puzzleSolution[i][3]),puzzleSolution[i].length()>4?puzzleSolution[i][4]:0,m)){puzzleAnswer[i]="? "+puzzleSolution[i];break;}puzzleAnswer[i]=String(a.fullmoveNumber())+(a.whiteToMove()?". ":"... ")+a.san(m);a.apply(m);}
   screen=Screen::PUZZLE_GAME;statusText=String("Puzzle ")+puzzleId+" - "+(puzzleWhite?"White":"Black")+" to move";return true;
 }
@@ -481,8 +484,8 @@ static void clickBoard(int x,int y){
   if(sq==selectedSq){selectedSq=-1;drawBoard();return;}ChessMove m;if(!board.findLegal(selectedSq,sq,'q',m)){char p=board.pieceAt(sq);selectedSq=(p&&ChessBoard::isWhite(p)==board.whiteToMove())?sq:-1;drawBoard();return;}selectedSq=-1;
   if(screen==Screen::GAME){if(board.whiteToMove()!=myWhite||pendingUci.length())return;pendingBoard=board;pendingLast=lastMove;pendingWtime=wtime;pendingBtime=btime;pendingClockSync=clockSyncMs;pendingUci=board.uci(m);pendingSentMs=millis();ChessBoard before=board;if(wtime>=0&&btime>=0){uint32_t elapsed=millis()-clockSyncMs;if(board.whiteToMove())wtime=max<int64_t>(0,wtime-int64_t(elapsed))+winc;else btime=max<int64_t>(0,btime-int64_t(elapsed))+binc;clockSyncMs=millis();}board.apply(m);lastMove=m;startAnimation(before,m);statusText=String("Sending ")+pendingUci;api.move(gameId,pendingUci);drawGameSide();return;}
   if(puzzleReplyPending||puzzleIndex>=puzzleSolutionCount)return;String u=board.uci(m),expected=puzzleSolution[puzzleIndex];bool altMate=false;if(u!=expected&&puzzleThemes.indexOf("mateIn1")>=0){ChessBoard p=board;p.apply(m);altMate=p.checkmate();}
-  if(u!=expected&&!altMate){puzzleMistake=true;resetHint();statusText="Not the puzzle move";drawPuzzleSide();return;}
-  ChessBoard before=board;board.apply(m);lastMove=m;startAnimation(before,m);puzzlePlayed[puzzlePlayedCount++]=u;resetHint();puzzleIndex++;
+  if(u!=expected&&!altMate){puzzleMistake=true;puzzleWrongMove=board.san(m);if(!puzzleWrongMove.length())puzzleWrongMove=u;resetHint();statusText="Not the puzzle move";drawBoard();drawPuzzleSide();return;}
+  puzzleWrongMove="";ChessBoard before=board;board.apply(m);lastMove=m;startAnimation(before,m);puzzlePlayed[puzzlePlayedCount++]=u;resetHint();puzzleIndex++;
   if(altMate){puzzleIndex=puzzleSolutionCount;statusText="Solved! Checkmate.";drawPuzzleSide();return;}
   if(puzzleIndex<puzzleSolutionCount){puzzleReplyPending=true;puzzleReplyDue=millis()+ANIM_MS+20;statusText="Correct...";}else statusText="Solved!";drawPuzzleSide();
 }
@@ -526,7 +529,7 @@ String serialLine;
 Wi-Fi credentials are configured locally and are not stored in this repository.
 
 void setup(){
-  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.12-board-refresh-fix");Serial.printf("[LCD] logical=%dx%d MADCTL=0x%02X\n",SCREEN_W,SCREEN_H,ST7796_MADCTL);pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,PIN_TFT_CS);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
+  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.13-puzzle-feedback");Serial.printf("[LCD] logical=%dx%d MADCTL=0x%02X\n",SCREEN_W,SCREEN_H,ST7796_MADCTL);pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,PIN_TFT_CS);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
 Wi-Fi credentials are configured locally and are not stored in this repository.
   if(connected){statusText=String("Connected to ")+WiFi.SSID();screen=Screen::HOME;ensureApi();redraw();}else{statusText="Choose a Wi-Fi network";refreshNetworks();}lastActivityMs=millis();
 }
