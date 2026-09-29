@@ -1,5 +1,6 @@
 #include "lichess_client.h"
 #include "secrets.h"
+#include "tls_root.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -55,7 +56,7 @@ class DecodedStream {
 static void prepareClient(WiFiClientSecure& c){
   // Follow the certificate chain currently served by Lichess/Cloudflare
   // instead of pinning one CA that can change when the CDN renews certificates.
-  c.useBuiltinCACertBundle();
+  c.setCACert(LICHESS_ROOT_CA);
   c.setHandshakeTimeout(25);
   c.setTimeout(15);
 }
