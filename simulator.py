@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, sys, json, queue, threading, io, base64, time, subprocess, re
+from urllib.parse import urlsplit
 import requests
 import pygame
 import chess
@@ -61,7 +62,7 @@ def load_piece_surfaces():
     return result
 
 def headers():
-    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.53"}
+    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.54"}
     if TOKEN:
         h["Authorization"] = f"Bearer {TOKEN}"
     return h
@@ -96,16 +97,16 @@ class Lichess:
         self.seek_response = None
 
     def check_network(self):
-        """Measure API response latency, not a full homepage download.
+        """Measure the real requests path and, separately, a direct path.
 
-        The old probe timed a fresh HTTPS GET of the entire Lichess homepage,
-        which mixed DNS/TCP/TLS setup, server response time and body download
-        into one misleading "latency" number.
+        v5.3 had a measurement bug: it used stream=True and closed the response
+        without consuming the body. That prevents urllib3 from safely returning
+        the connection to the pool, so the supposed "warm" request could create
+        another fresh connection and look almost identical to the cold request.
 
-        This probe uses a small API endpoint with streaming enabled so the
-        timer stops as soon as response headers arrive. Two sequential probes
-        are made: the first is the cold connection, the second reuses the
-        connection and is closer to normal in-game API latency.
+        Here each tiny API response is fully consumed. `Response.elapsed` gives
+        time-to-response-headers, while consuming the body lets the next request
+        reuse the same TCP/TLS connection.
         """
         probe_headers = {"User-Agent": headers()["User-Agent"]}
         if TOKEN:
@@ -114,32 +115,81 @@ class Lichess:
         else:
             url = BASE + "/api/tv/channels"
 
-        try:
+        def safe_proxy_label(proxy_url):
+            if not proxy_url:
+                return "direct"
+            try:
+                u = urlsplit(proxy_url)
+                host = u.hostname or "proxy"
+                if u.port:
+                    host += f":{u.port}"
+                return host
+            except Exception:
+                return "proxy"
+
+        def run_probe(trust_env):
+            samples = []
+            statuses = []
             with requests.Session() as s:
-                samples = []
-                statuses = []
-                for _ in range(2):
-                    t0 = time.monotonic()
-                    with s.get(
+                s.trust_env = trust_env
+                for _ in range(3):
+                    r = s.get(
                         url,
                         headers=probe_headers,
                         timeout=8,
-                        stream=True,
+                        stream=False,
                         allow_redirects=False,
-                    ) as r:
-                        ms = int((time.monotonic() - t0) * 1000)
-                        samples.append(ms)
-                        statuses.append(r.status_code)
-                # A 401 still proves Lichess is reachable if the token is bad.
-                online = all(status < 500 for status in statuses)
-                return {
-                    "online": online,
-                    "latency": samples[-1],
-                    "cold_latency": samples[0],
-                    "status": statuses[-1],
-                }
+                    )
+                    # Body is already downloaded when stream=False. Touch it
+                    # explicitly to make the connection-reuse requirement clear.
+                    _ = r.content
+                    samples.append(int(r.elapsed.total_seconds() * 1000))
+                    statuses.append(r.status_code)
+            return {
+                "cold": samples[0],
+                # Median-ish of two warm samples without importing statistics.
+                "warm": min(samples[1:]) if len(samples) > 1 else samples[0],
+                "samples": samples,
+                "statuses": statuses,
+            }
+
+        try:
+            proxies = requests.utils.get_environ_proxies(url)
+            proxy_url = proxies.get("https") or proxies.get("http")
+            routed = run_probe(True)
+
+            direct = None
+            direct_error = None
+            try:
+                direct = run_probe(False)
+            except Exception as e:
+                direct_error = str(e)
+
+            online = all(status < 500 for status in routed["statuses"])
+            return {
+                "online": online,
+                "latency": routed["warm"],
+                "cold_latency": routed["cold"],
+                "routed_samples": routed["samples"],
+                "proxy_label": safe_proxy_label(proxy_url),
+                "uses_proxy": bool(proxy_url),
+                "direct_latency": None if direct is None else direct["warm"],
+                "direct_cold_latency": None if direct is None else direct["cold"],
+                "direct_samples": None if direct is None else direct["samples"],
+                "direct_error": direct_error,
+                "status": routed["statuses"][-1],
+            }
         except Exception as e:
-            return {"online": False, "latency": None, "cold_latency": None, "error": str(e)}
+            return {
+                "online": False,
+                "latency": None,
+                "cold_latency": None,
+                "direct_latency": None,
+                "direct_cold_latency": None,
+                "proxy_label": "unknown",
+                "uses_proxy": False,
+                "error": str(e),
+            }
 
     def get_account(self):
         if not TOKEN:
@@ -342,7 +392,7 @@ class Lichess:
 class App:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5.3")
+        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5.4")
         self.sc = pygame.display.set_mode((W,H))
         self.clock = pygame.time.Clock()
         self.f24 = pygame.font.SysFont("Arial",24,bold=True)
@@ -401,6 +451,11 @@ class App:
         self.puzzle_saved_status = ""
         self.network_state = "checking"
         self.network_latency = None
+        self.network_cold_latency = None
+        self.network_direct_latency = None
+        self.network_direct_cold_latency = None
+        self.network_proxy_label = "unknown"
+        self.network_uses_proxy = False
         self.network_detail = "Checking Lichess..."
         self.current_ssid = "—"
         self.wifi_device = None
@@ -1296,31 +1351,34 @@ class App:
         pygame.draw.circle(self.sc,col,(30,61),8)
         state = "Connected" if self.network_state=="online" else ("Checking..." if self.network_state=="checking" else "Disconnected")
         self.sc.blit(self.txt(state,self.f18),(48,50))
-        self.sc.blit(self.txt(f"Current Wi-Fi: {self.current_ssid}",self.f15,MUTED),(18,76))
+        self.sc.blit(self.txt(f"Wi-Fi: {self.current_ssid}",self.f15,MUTED),(18,76))
 
-        self.sc.blit(self.txt("Built-in auto-connect priority",self.f15),(18,102))
-        y = 125
+        route = f"proxy {self.network_proxy_label}" if self.network_uses_proxy else "direct"
+        self.sc.blit(self.txt(f"Requests route: {route}",self.f15),(18,104))
+
+        warm = f"{self.network_latency} ms" if self.network_latency is not None else "—"
+        cold = f"{self.network_cold_latency} ms" if self.network_cold_latency is not None else "—"
+        self.sc.blit(self.txt(f"Current route warm/cold: {warm} / {cold}",self.f15),(18,131))
+
+        dwarm = f"{self.network_direct_latency} ms" if self.network_direct_latency is not None else "—"
+        dcold = f"{self.network_direct_cold_latency} ms" if self.network_direct_cold_latency is not None else "—"
+        self.sc.blit(self.txt(f"Direct warm/cold: {dwarm} / {dcold}",self.f15),(18,156))
+
+        move_rtt = f"{self.move_post_rtt_ms} ms" if self.move_post_rtt_ms is not None else "—"
+        stream_rtt = f"{self.move_stream_confirm_ms} ms" if self.move_stream_confirm_ms is not None else "—"
+        self.sc.blit(self.txt(f"Last move POST / stream sync: {move_rtt} / {stream_rtt}",self.f15),(18,181))
+
+        self.sc.blit(self.txt("Known Wi-Fi priority:",self.f12,MUTED),(18,211))
+        y=229
         for profile in KNOWN_WIFI_PROFILES:
             current = (self.current_ssid == profile["ssid"])
             mark = "●" if current else "○"
             col2 = GOOD if current else MUTED
-            self.sc.blit(
-                self.txt(f"{profile['priority']}. {mark} {profile['ssid']}",self.f15,col2),
-                (28,y)
-            )
-            y += 25
+            self.sc.blit(self.txt(f"{profile['priority']}. {mark} {profile['ssid']}",self.f12,col2),(28,y))
+            y += 17
 
-        self.sc.blit(self.txt(f"Auto: {self.wifi_auto_state}",self.f12,MUTED),(18,202))
-
-        latency = f"{self.network_latency} ms" if self.network_latency is not None else "—"
-        cold = f"{self.network_cold_latency} ms" if self.network_cold_latency is not None else "—"
-        self.sc.blit(self.txt(f"Lichess warm/cold: {latency} / {cold}",self.f12,MUTED),(18,222))
-        move_rtt = f"{self.move_post_rtt_ms} ms" if self.move_post_rtt_ms is not None else "—"
-        stream_rtt = f"{self.move_stream_confirm_ms} ms" if self.move_stream_confirm_ms is not None else "—"
-        self.sc.blit(self.txt(f"Move POST / sync: {move_rtt} / {stream_rtt}",self.f12,MUTED),(18,240))
-
-        self.button(pygame.Rect(18,272,210,36),"Auto-connect now",on=True)
-        self.button(pygame.Rect(252,272,210,36),"Back")
+        self.button(pygame.Rect(18,282,210,30),"Recheck + auto Wi-Fi",on=True)
+        self.button(pygame.Rect(252,282,210,30),"Back")
 
     def draw_online_confirm(self):
         self.sc.fill(BG)
@@ -1504,6 +1562,10 @@ class App:
                         self.current_ssid=data.get("ssid")
                     if data.get("wifi_auto_state"):
                         self.wifi_auto_state=data.get("wifi_auto_state")
+                    self.network_proxy_label=data.get("proxy_label","unknown")
+                    self.network_uses_proxy=bool(data.get("uses_proxy"))
+                    self.network_direct_latency=data.get("direct_latency")
+                    self.network_direct_cold_latency=data.get("direct_cold_latency")
                     if data.get("online"):
                         self.network_state="online"
                         self.network_latency=data.get("latency")
