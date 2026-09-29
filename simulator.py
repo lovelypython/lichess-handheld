@@ -315,6 +315,13 @@ class App:
         self.puzzle_had_mistake = False
         self.puzzle_answer_revealed = False
         self.puzzle_loading = False
+        # Puzzle solution review / step navigation state.
+        self.puzzle_review_mode = False
+        self.puzzle_review_ply = 0
+        self.puzzle_saved_board = None
+        self.puzzle_saved_i = 0
+        self.puzzle_saved_last = None
+        self.puzzle_saved_status = ""
         self.network_state = "checking"
         self.network_latency = None
         self.network_detail = "Checking Lichess..."
@@ -513,6 +520,86 @@ class App:
             b.push(m)
         return out
 
+    def _puzzle_board_at_ply(self, ply):
+        """Return the puzzle start position advanced by exactly `ply` solution plies."""
+        if self.puzzle_start_board is None:
+            raise ValueError("Puzzle start board is unavailable")
+        ply = max(0, min(int(ply), len(self.puzzle_solution)))
+        b = self.puzzle_start_board.copy(stack=False)
+        last = None
+        for uci in self.puzzle_solution[:ply]:
+            m = chess.Move.from_uci(uci)
+            if m not in b.legal_moves:
+                raise ValueError(f"Review line mismatch at {uci}")
+            b.push(m)
+            last = m
+        return b, last
+
+    def _save_live_puzzle_state_for_review(self):
+        if self.puzzle_saved_board is None:
+            self.puzzle_saved_board = self.board.copy(stack=False)
+            self.puzzle_saved_i = self.puzzle_i
+            self.puzzle_saved_last = self.last
+            self.puzzle_saved_status = self.status
+
+    def enter_puzzle_review(self, target_ply=None):
+        """Enter non-interactive solution review and optionally jump to a ply."""
+        if not self.puzzle_solution or self.puzzle_start_board is None:
+            self.setstatus("No puzzle line to review.")
+            return
+        self._save_live_puzzle_state_for_review()
+        self.puzzle_answer_revealed = True
+        self.puzzle_hint_square = None
+        self.selected = None
+        self.puzzle_review_mode = True
+        if target_ply is None:
+            target_ply = self.puzzle_i
+        self.set_puzzle_review_ply(target_ply)
+        self.screen = "puzzle_game"
+
+    def set_puzzle_review_ply(self, ply):
+        if not self.puzzle_solution or self.puzzle_start_board is None:
+            return
+        ply = max(0, min(int(ply), len(self.puzzle_solution)))
+        try:
+            b, last = self._puzzle_board_at_ply(ply)
+        except Exception as e:
+            self.setstatus(f"Review failed: {e}")
+            return
+        self.board = b
+        self.last = last
+        self.selected = None
+        self.puzzle_hint_square = None
+        self.puzzle_review_ply = ply
+        self.my_color = self.puzzle_color
+        if ply == 0:
+            self.setstatus(f"Solution review: start position · 0/{len(self.puzzle_solution)}")
+        else:
+            step = self.puzzle_answer_steps[ply-1] if ply-1 < len(self.puzzle_answer_steps) else self.puzzle_solution[ply-1]
+            self.setstatus(f"Solution review {ply}/{len(self.puzzle_solution)}: {step}")
+
+    def puzzle_prev_step(self):
+        if not self.puzzle_review_mode:
+            self.enter_puzzle_review(self.puzzle_i)
+        self.set_puzzle_review_ply(self.puzzle_review_ply - 1)
+
+    def puzzle_next_step(self):
+        if not self.puzzle_review_mode:
+            self.enter_puzzle_review(self.puzzle_i)
+        self.set_puzzle_review_ply(self.puzzle_review_ply + 1)
+
+    def resume_puzzle_from_review(self):
+        """Return to the exact live position that existed before step review."""
+        if self.puzzle_saved_board is not None:
+            self.board = self.puzzle_saved_board.copy(stack=False)
+            self.puzzle_i = self.puzzle_saved_i
+            self.last = self.puzzle_saved_last
+            self.setstatus(self.puzzle_saved_status or "Returned to puzzle.")
+        self.puzzle_review_mode = False
+        self.puzzle_hint_square = None
+        self.selected = None
+        self.screen = "puzzle_game"
+
     def request_next_puzzle(self):
         if self.puzzle_loading:
             return
@@ -567,6 +654,12 @@ class App:
             self.puzzle_had_mistake=False
             self.puzzle_answer_revealed=False
             self.puzzle_loading=False
+            self.puzzle_review_mode=False
+            self.puzzle_review_ply=0
+            self.puzzle_saved_board=None
+            self.puzzle_saved_i=0
+            self.puzzle_saved_last=None
+            self.puzzle_saved_status=""
             self.last=None; self.selected=None
             self.screen="puzzle_game"
 
@@ -586,6 +679,9 @@ class App:
         return (f,7-r) if self.my_color==chess.WHITE else (7-f,r)
 
     def click_board(self,x,y):
+        if self.screen=="puzzle_game" and self.puzzle_review_mode:
+            self.setstatus("Solution review is read-only. Use Prev/Next or Resume.")
+            return
         sq=self.disp_to_sq(x//SQ,y//SQ)
         if self.selected is None:
             p=self.board.piece_at(sq)
@@ -801,7 +897,7 @@ class App:
         if len(steps)>12:
             self.sc.blit(self.txt(f"+ {len(steps)-12} more plies",self.f12,MUTED),(18,262))
         self.button(pygame.Rect(18,276,136,32),"Back to board")
-        self.button(pygame.Rect(172,276,136,32),"Hint")
+        self.button(pygame.Rect(172,276,136,32),"View line",on=True)
         self.button(pygame.Rect(326,276,136,32),"Next puzzle",on=True)
 
     def draw_game(self):
@@ -832,12 +928,24 @@ class App:
             y=116
             for chunk in [themes[i:i+19] for i in range(0,len(themes),19)][:3]:
                 self.sc.blit(self.txt(chunk,self.f12,MUTED),(x,y)); y+=16
-            self.sc.blit(self.txt(f"{self.puzzle_i}/{len(self.puzzle_solution)} plies",self.f15),(x,181))
-            self.button(pygame.Rect(330,216,66,30),"Hint")
-            self.button(pygame.Rect(404,216,66,30),"Answer")
-            self.button(pygame.Rect(330,252,66,30),"Home")
-            self.button(pygame.Rect(404,252,66,30),"Next",enabled=not self.puzzle_loading)
-        self.sc.blit(self.txt(self.status[:24],self.f12,MUTED),(330,302))
+            shown_ply = self.puzzle_review_ply if self.puzzle_review_mode else self.puzzle_i
+            label = "Review" if self.puzzle_review_mode else "Progress"
+            self.sc.blit(self.txt(f"{label} {shown_ply}/{len(self.puzzle_solution)}",self.f15),(x,181))
+
+            if self.puzzle_review_mode:
+                self.button(pygame.Rect(330,210,66,28),"< Prev",enabled=self.puzzle_review_ply>0)
+                self.button(pygame.Rect(404,210,66,28),"Next >",enabled=self.puzzle_review_ply<len(self.puzzle_solution))
+                self.button(pygame.Rect(330,244,66,28),"Resume")
+                self.button(pygame.Rect(404,244,66,28),"Answer")
+            else:
+                self.button(pygame.Rect(330,210,66,28),"Hint")
+                self.button(pygame.Rect(404,210,66,28),"Answer")
+                self.button(pygame.Rect(330,244,66,28),"< Prev",enabled=self.puzzle_i>0)
+                self.button(pygame.Rect(404,244,66,28),"Next >",enabled=bool(self.puzzle_solution))
+
+            self.button(pygame.Rect(330,278,66,28),"Home")
+            self.button(pygame.Rect(404,278,66,28),"Next Puz",enabled=not self.puzzle_loading)
+        self.sc.blit(self.txt(self.status[:24],self.f12,MUTED),(330,308))
 
     def click(self,pos):
         x,y=pos
@@ -886,7 +994,7 @@ class App:
         elif self.screen=="puzzle_answer":
             if pygame.Rect(18,276,136,32).collidepoint(pos): self.screen="puzzle_game"
             elif pygame.Rect(172,276,136,32).collidepoint(pos):
-                self.screen="puzzle_game"; self.show_puzzle_hint()
+                self.enter_puzzle_review(0)
             elif pygame.Rect(326,276,136,32).collidepoint(pos): self.request_next_puzzle()
 
         elif self.screen in ("game","puzzle_game"):
@@ -896,10 +1004,18 @@ class App:
                 if pygame.Rect(330,220,140,32).collidepoint(pos): self.home()
                 elif pygame.Rect(330,260,140,32).collidepoint(pos): self.api.resign(self.game_id)
             else:
-                if pygame.Rect(330,216,66,30).collidepoint(pos): self.show_puzzle_hint()
-                elif pygame.Rect(404,216,66,30).collidepoint(pos): self.show_puzzle_answer()
-                elif pygame.Rect(330,252,66,30).collidepoint(pos): self.home()
-                elif pygame.Rect(404,252,66,30).collidepoint(pos): self.request_next_puzzle()
+                if self.puzzle_review_mode:
+                    if pygame.Rect(330,210,66,28).collidepoint(pos): self.puzzle_prev_step()
+                    elif pygame.Rect(404,210,66,28).collidepoint(pos): self.puzzle_next_step()
+                    elif pygame.Rect(330,244,66,28).collidepoint(pos): self.resume_puzzle_from_review()
+                    elif pygame.Rect(404,244,66,28).collidepoint(pos): self.show_puzzle_answer()
+                else:
+                    if pygame.Rect(330,210,66,28).collidepoint(pos): self.show_puzzle_hint()
+                    elif pygame.Rect(404,210,66,28).collidepoint(pos): self.show_puzzle_answer()
+                    elif pygame.Rect(330,244,66,28).collidepoint(pos): self.puzzle_prev_step()
+                    elif pygame.Rect(404,244,66,28).collidepoint(pos): self.puzzle_next_step()
+                if pygame.Rect(330,278,66,28).collidepoint(pos): self.home()
+                elif pygame.Rect(404,278,66,28).collidepoint(pos): self.request_next_puzzle()
 
     def run(self):
         run=True
