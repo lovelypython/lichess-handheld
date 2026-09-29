@@ -1,0 +1,6 @@
+.pio/
+.vscode/
+__pycache__/
+*.pyc
+Precompiled firmware images are intentionally excluded; build from source with PlatformIO.
+include/secrets.local.h
