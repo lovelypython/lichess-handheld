@@ -61,7 +61,7 @@ def load_piece_surfaces():
     return result
 
 def headers():
-    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.5"}
+    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.52"}
     if TOKEN:
         h["Authorization"] = f"Bearer {TOKEN}"
     return h
@@ -79,19 +79,50 @@ class Lichess:
         self.seek_response = None
 
     def check_network(self):
-        """Check basic Internet/Lichess reachability without consuming API state."""
-        t0 = time.monotonic()
+        """Measure API response latency, not a full homepage download.
+
+        The old probe timed a fresh HTTPS GET of the entire Lichess homepage,
+        which mixed DNS/TCP/TLS setup, server response time and body download
+        into one misleading "latency" number.
+
+        This probe uses a small API endpoint with streaming enabled so the
+        timer stops as soon as response headers arrive. Two sequential probes
+        are made: the first is the cold connection, the second reuses the
+        connection and is closer to normal in-game API latency.
+        """
+        probe_headers = {"User-Agent": headers()["User-Agent"]}
+        if TOKEN:
+            probe_headers["Authorization"] = f"Bearer {TOKEN}"
+            url = BASE + "/api/account"
+        else:
+            url = BASE + "/api/tv/channels"
+
         try:
-            r = requests.get(
-                BASE + "/",
-                headers={"User-Agent": headers()["User-Agent"]},
-                timeout=8,
-                allow_redirects=True,
-            )
-            ms = int((time.monotonic() - t0) * 1000)
-            return {"online": r.status_code < 500, "latency": ms, "status": r.status_code}
+            with requests.Session() as s:
+                samples = []
+                statuses = []
+                for _ in range(2):
+                    t0 = time.monotonic()
+                    with s.get(
+                        url,
+                        headers=probe_headers,
+                        timeout=8,
+                        stream=True,
+                        allow_redirects=False,
+                    ) as r:
+                        ms = int((time.monotonic() - t0) * 1000)
+                        samples.append(ms)
+                        statuses.append(r.status_code)
+                # A 401 still proves Lichess is reachable if the token is bad.
+                online = all(status < 500 for status in statuses)
+                return {
+                    "online": online,
+                    "latency": samples[-1],
+                    "cold_latency": samples[0],
+                    "status": statuses[-1],
+                }
         except Exception as e:
-            return {"online": False, "latency": None, "error": str(e)}
+            return {"online": False, "latency": None, "cold_latency": None, "error": str(e)}
 
     def get_account(self):
         if not TOKEN:
@@ -111,7 +142,7 @@ class Lichess:
                                 timeout=(15, None),
                                 headers={**headers(), "Accept":"application/x-ndjson"}) as r:
                     r.raise_for_status()
-                    for line in r.iter_lines(decode_unicode=True):
+                    for line in r.iter_lines(chunk_size=1, decode_unicode=True):
                         if self.event_stop.is_set(): break
                         if not line: continue
                         try:
@@ -155,7 +186,7 @@ class Lichess:
                     if r.status_code >= 400:
                         EVQ.put(("status", f"Seek failed {r.status_code}: {r.text[:120]}"))
                         return
-                    for _ in r.iter_lines():
+                    for _ in r.iter_lines(chunk_size=1):
                         if stop.is_set():
                             break
                 if not stop.is_set():
@@ -187,7 +218,7 @@ class Lichess:
                                 timeout=(15, None),
                                 headers={**headers(), "Accept":"application/x-ndjson"}) as r:
                     r.raise_for_status()
-                    for line in r.iter_lines(decode_unicode=True):
+                    for line in r.iter_lines(chunk_size=1, decode_unicode=True):
                         if stop.is_set(): break
                         if not line: continue
                         try: EVQ.put(("game", json.loads(line)))
@@ -198,12 +229,26 @@ class Lichess:
 
     def move(self, gid, uci):
         def work():
+            t0 = time.monotonic()
             try:
                 r = self.s.post(BASE + f"/api/board/game/{gid}/move/{uci}", timeout=15)
-                if r.status_code != 200:
-                    EVQ.put(("status", f"Move failed {r.status_code}: {r.text[:100]}"))
+                rtt = int((time.monotonic() - t0) * 1000)
+                EVQ.put(("move_result", {
+                    "ok": r.status_code == 200,
+                    "uci": uci,
+                    "rtt_ms": rtt,
+                    "status_code": r.status_code,
+                    "text": r.text[:100],
+                }))
             except Exception as e:
-                EVQ.put(("status", f"Move error: {e}"))
+                rtt = int((time.monotonic() - t0) * 1000)
+                EVQ.put(("move_result", {
+                    "ok": False,
+                    "uci": uci,
+                    "rtt_ms": rtt,
+                    "status_code": None,
+                    "text": str(e),
+                }))
         threading.Thread(target=work, daemon=True).start()
 
     def resign(self, gid):
@@ -280,7 +325,7 @@ class Lichess:
 class App:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5")
+        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v5.2")
         self.sc = pygame.display.set_mode((W,H))
         self.clock = pygame.time.Clock()
         self.f24 = pygame.font.SysFont("Arial",24,bold=True)
@@ -299,6 +344,21 @@ class App:
         self.game_status = "idle"
         self.opponent = "—"
         self.wtime = self.btime = None
+        self.winc = self.binc = 0
+        # Authoritative clock snapshots arrive in gameFull/gameState.
+        # Between snapshots we interpolate locally with time.monotonic().
+        self.clock_sync_mono = None
+        self.clock_source_delay_ms = 0.0
+        self.clock_last_sync_mono = None
+        self.clock_last_correction_ms = 0
+        self.move_post_rtt_ms = None
+        self.move_stream_confirm_ms = None
+        self.pending_move_uci = None
+        self.pending_move_sent_mono = None
+        self.pending_prev_board = None
+        self.pending_prev_last = None
+        self.pending_prev_clock = None
+        self.network_cold_latency = None
         self.account_id = ""
         self.ai_level = 3
         self.ai_time = (5,3)
@@ -396,6 +456,14 @@ class App:
         self.board=chess.Board()
         self.selected=None
         self.last=None
+        self.pending_move_uci=None
+        self.pending_move_sent_mono=None
+        self.pending_prev_board=None
+        self.pending_prev_last=None
+        self.pending_prev_clock=None
+        self.clock_sync_mono=None
+        self.clock_last_sync_mono=None
+        self.move_stream_confirm_ms=None
         self.api.start_game_stream(gid)
 
     def process_event(self,d):
@@ -427,8 +495,113 @@ class App:
             except: break
         self.board=b; self.last=last
 
+    def estimated_one_way_ms(self):
+        """Small display-only estimate of stream transit time.
+
+        We never alter the actual server clock. This only makes the locally
+        interpolated display closer to the server while waiting for the next
+        authoritative gameState.
+        """
+        candidates = []
+        if self.network_latency is not None:
+            candidates.append(float(self.network_latency))
+        if self.move_post_rtt_ms is not None:
+            candidates.append(float(self.move_post_rtt_ms))
+        if not candidates:
+            return 0.0
+        # Use the faster recent path estimate so server processing time does not
+        # get mistaken entirely for network delay. Cap extreme compensation.
+        return max(0.0, min(min(candidates) / 2.0, 500.0))
+
+    def set_clock_snapshot(self, wtime, btime, source_delay_ms=0.0):
+        now = time.monotonic()
+        old_w, old_b = self.current_clocks(include_source_delay=False)
+        self.wtime = None if wtime is None else float(wtime)
+        self.btime = None if btime is None else float(btime)
+        self.clock_sync_mono = now
+        self.clock_last_sync_mono = now
+        self.clock_source_delay_ms = max(0.0, float(source_delay_ms))
+
+        # Diagnostic only: how much an authoritative state corrected our
+        # current local display. Large values help identify real stream delay.
+        if old_w is not None and old_b is not None and self.wtime is not None and self.btime is not None:
+            self.clock_last_correction_ms = int(max(
+                abs(old_w - self.wtime),
+                abs(old_b - self.btime),
+            ))
+
+    def current_clocks(self, include_source_delay=True):
+        """Return continuously interpolated (white_ms, black_ms).
+
+        Lichess does not send a clock packet every 10/100/1000 ms. It sends
+        authoritative clock values with game state events, so the correct UI
+        architecture is: server snapshot -> local monotonic countdown ->
+        resync on every new snapshot.
+        """
+        if self.wtime is None or self.btime is None:
+            return self.wtime, self.btime
+        w = float(self.wtime)
+        b = float(self.btime)
+        if self.clock_sync_mono is None or self.game_status != "started":
+            return max(0.0, w), max(0.0, b)
+
+        elapsed = max(0.0, (time.monotonic() - self.clock_sync_mono) * 1000.0)
+        if include_source_delay:
+            elapsed += self.clock_source_delay_ms
+
+        # board.turn is the side whose clock is currently running.
+        if self.board.turn == chess.WHITE:
+            w -= elapsed
+        else:
+            b -= elapsed
+        return max(0.0, w), max(0.0, b)
+
+    def sync_server_clocks(self, state):
+        self.winc = int(state.get("winc") or self.winc or 0)
+        self.binc = int(state.get("binc") or self.binc or 0)
+        self.set_clock_snapshot(
+            state.get("wtime"),
+            state.get("btime"),
+            source_delay_ms=self.estimated_one_way_ms(),
+        )
+
+    def clear_pending_move(self):
+        self.pending_move_uci = None
+        self.pending_move_sent_mono = None
+        self.pending_prev_board = None
+        self.pending_prev_last = None
+        self.pending_prev_clock = None
+
+    def handle_move_result(self, data):
+        self.move_post_rtt_ms = data.get("rtt_ms")
+        if data.get("ok"):
+            # The board was already updated optimistically. The game stream is
+            # still authoritative and will shortly correct board + clock.
+            self.setstatus(f"Move accepted · API {self.move_post_rtt_ms} ms · waiting for clock sync")
+            return
+
+        # Server rejected the move: roll back the optimistic board and resume
+        # the mover's clock, including time spent waiting for the failed POST.
+        if self.pending_prev_board is not None and self.pending_prev_clock is not None:
+            self.board = self.pending_prev_board.copy(stack=False)
+            self.last = self.pending_prev_last
+            w, b, running_color, sent_at = self.pending_prev_clock
+            extra = max(0.0, (time.monotonic() - sent_at) * 1000.0)
+            if running_color == chess.WHITE:
+                w = max(0.0, w - extra)
+            else:
+                b = max(0.0, b - extra)
+            self.set_clock_snapshot(w, b, source_delay_ms=0)
+        self.setstatus(
+            f"Move rejected · API {self.move_post_rtt_ms} ms · "
+            f"{data.get('status_code') or ''} {data.get('text','')}"
+        )
+        self.clear_pending_move()
+
     def process_game(self,d):
+        recv_mono = time.monotonic()
         t=d.get("type")
+        state = None
         if t=="gameFull":
             white=d.get("white",{}); black=d.get("black",{})
             wid=(white.get("id") or "").lower()
@@ -440,26 +613,39 @@ class App:
                 self.my_color=chess.WHITE
                 self.opponent=black.get("name") or black.get("id") or ("Lichess AI" if black.get("aiLevel") else "Black")
             elif white.get("aiLevel") is not None:
-                # If account lookup is still racing the first game event,
-                # AI identity lets us infer that the human is Black.
                 self.my_color=chess.BLACK
                 self.opponent="Lichess AI"
             elif black.get("aiLevel") is not None:
                 self.my_color=chess.WHITE
                 self.opponent="Lichess AI"
-            # Otherwise keep the color learned from gameStart.
             if self.my_color==chess.BLACK:
                 self.opponent=white.get("name") or white.get("id") or self.opponent
             else:
                 self.opponent=black.get("name") or black.get("id") or self.opponent
-            st=d.get("state",{})
-            self.apply_moves(st.get("moves",""))
-            self.wtime=st.get("wtime"); self.btime=st.get("btime")
-            self.game_status=st.get("status","started")
+            state=d.get("state",{})
+            self.apply_moves(state.get("moves",""))
+            self.game_status=state.get("status","started")
         elif t=="gameState":
-            self.apply_moves(d.get("moves",""))
-            self.wtime=d.get("wtime"); self.btime=d.get("btime")
-            self.game_status=d.get("status",self.game_status)
+            state=d
+            self.apply_moves(state.get("moves",""))
+            self.game_status=state.get("status",self.game_status)
+
+        if state is not None:
+            self.sync_server_clocks(state)
+
+            # If this server state contains our optimistic move, measure how
+            # long it took from touch -> authoritative stream confirmation.
+            if self.pending_move_uci and self.pending_move_sent_mono is not None:
+                moves = state.get("moves","").split()
+                if self.pending_move_uci in moves[-2:]:
+                    self.move_stream_confirm_ms = int(
+                        (recv_mono - self.pending_move_sent_mono) * 1000
+                    )
+                    self.setstatus(
+                        f"Clock synced · API {self.move_post_rtt_ms or '?'} ms · "
+                        f"stream {self.move_stream_confirm_ms} ms"
+                    )
+                    self.clear_pending_move()
 
     def _build_puzzle_position(self, p, g):
         """Build exactly the position Lichess presents to the solver.
@@ -702,6 +888,36 @@ class App:
         self.selected=None
         if self.screen=="game":
             if self.board.turn!=self.my_color: return
+            if self.pending_move_uci is not None:
+                self.setstatus("Previous move is still syncing.")
+                return
+
+            # Save the authoritative/local-interpolated state so a rejected
+            # move can be rolled back cleanly.
+            now = time.monotonic()
+            cur_w, cur_b = self.current_clocks()
+            mover = self.board.turn
+            self.pending_prev_board = self.board.copy(stack=False)
+            self.pending_prev_last = self.last
+            self.pending_prev_clock = (cur_w, cur_b, mover, now)
+            self.pending_move_uci = m.uci()
+            self.pending_move_sent_mono = now
+
+            # Optimistic UI: show the move immediately instead of waiting up to
+            # a network round trip for Lichess to echo it back.
+            self.board.push(m)
+            self.last = m
+
+            # Freeze mover and start opponent immediately. Apply Fischer
+            # increment locally; the next gameState will correct any difference.
+            if cur_w is not None and cur_b is not None:
+                if mover == chess.WHITE:
+                    cur_w += self.winc
+                else:
+                    cur_b += self.binc
+                self.set_clock_snapshot(cur_w, cur_b, source_delay_ms=0)
+
+            self.setstatus(f"Sending {m.uci()}…")
             self.api.move(self.game_id,m.uci())
         else:
             exp=self.puzzle_solution[self.puzzle_i] if self.puzzle_i<len(self.puzzle_solution) else None
@@ -773,7 +989,12 @@ class App:
 
     def fmt(self,ms):
         if ms is None: return "--:--"
-        s=max(0,int(ms)//1000); return f"{s//60:02d}:{s%60:02d}"
+        ms=max(0,int(ms))
+        if ms < 20000:
+            s=ms/1000.0
+            return f"{int(s)//60:02d}:{int(s)%60:02d}.{(ms%1000)//100}"
+        s=ms//1000
+        return f"{s//60:02d}:{s%60:02d}"
 
     def draw_home(self):
         self.sc.fill(BG)
@@ -844,12 +1065,16 @@ class App:
         self.sc.blit(self.txt(state,self.f18),(58,74))
         self.sc.blit(self.txt("Lichess server",self.f15,MUTED),(18,120))
         latency = f"{self.network_latency} ms" if self.network_latency is not None else "—"
-        self.sc.blit(self.txt(f"Reachability: {state}   Latency: {latency}",self.f15),(18,143))
-        self.sc.blit(self.txt(f"Token: {'loaded' if TOKEN else 'not set'}",self.f15),(18,174))
+        cold = f"{self.network_cold_latency} ms" if self.network_cold_latency is not None else "—"
+        self.sc.blit(self.txt(f"Warm API TTFB: {latency}",self.f15),(18,143))
+        self.sc.blit(self.txt(f"Cold DNS/TCP/TLS/API: {cold}",self.f15,MUTED),(18,166))
+        move_rtt = f"{self.move_post_rtt_ms} ms" if self.move_post_rtt_ms is not None else "—"
+        stream_rtt = f"{self.move_stream_confirm_ms} ms" if self.move_stream_confirm_ms is not None else "—"
+        self.sc.blit(self.txt(f"Last move POST: {move_rtt}   stream sync: {stream_rtt}",self.f15),(18,191))
         acct=(self.api.account or {}).get("username","—")
-        self.sc.blit(self.txt(f"Account: {acct}",self.f15),(18,197))
-        self.sc.blit(self.txt("Mac prototype uses the Mac's current network.",self.f12,MUTED),(18,228))
-        self.sc.blit(self.txt("ESP32 version will replace this with Wi-Fi scan/connect.",self.f12,MUTED),(18,247))
+        self.sc.blit(self.txt(f"Account: {acct}   Token: {'loaded' if TOKEN else 'not set'}",self.f15),(18,216))
+        self.sc.blit(self.txt("Clock runs locally between authoritative Lichess updates.",self.f12,MUTED),(18,241))
+        self.sc.blit(self.txt("It is re-synced on every gameFull/gameState event.",self.f12,MUTED),(18,257))
         self.button(pygame.Rect(18,272,210,36),"Retry connection",on=True)
         self.button(pygame.Rect(252,272,210,36),"Back")
 
@@ -909,14 +1134,20 @@ class App:
             me=(self.api.account or {}).get("username","You")
             top=self.opponent if self.my_color==chess.WHITE else me
             bot=me if self.my_color==chess.WHITE else self.opponent
-            tt=self.btime if self.my_color==chess.WHITE else self.wtime
-            bt=self.wtime if self.my_color==chess.WHITE else self.btime
+            live_w, live_b = self.current_clocks()
+            tt=live_b if self.my_color==chess.WHITE else live_w
+            bt=live_w if self.my_color==chess.WHITE else live_b
             self.sc.blit(self.txt(top,self.f15,MUTED),(x,48))
             self.sc.blit(self.txt(self.fmt(tt),self.f24),(x,68))
             self.sc.blit(self.txt(bot,self.f15,MUTED),(x,126))
             self.sc.blit(self.txt(self.fmt(bt),self.f24),(x,146))
-            self.button(pygame.Rect(330,220,140,32),"Home")
-            self.button(pygame.Rect(330,260,140,32),"Resign")
+
+            api_txt = "—" if self.move_post_rtt_ms is None else f"{self.move_post_rtt_ms}ms"
+            stream_txt = "—" if self.move_stream_confirm_ms is None else f"{self.move_stream_confirm_ms}ms"
+            self.sc.blit(self.txt(f"API {api_txt}",self.f12,MUTED),(x,184))
+            self.sc.blit(self.txt(f"Sync {stream_txt}",self.f12,MUTED),(x,199))
+            self.button(pygame.Rect(330,226,140,32),"Home")
+            self.button(pygame.Rect(330,264,140,32),"Resign")
         else:
             p=self.puzzle_meta
             self.sc.blit(self.txt("Puzzle",self.f18),(x,10))
@@ -1001,8 +1232,8 @@ class App:
             if x<BOARD:
                 self.click_board(x,y)
             elif self.screen=="game":
-                if pygame.Rect(330,220,140,32).collidepoint(pos): self.home()
-                elif pygame.Rect(330,260,140,32).collidepoint(pos): self.api.resign(self.game_id)
+                if pygame.Rect(330,226,140,32).collidepoint(pos): self.home()
+                elif pygame.Rect(330,264,140,32).collidepoint(pos): self.api.resign(self.game_id)
             else:
                 if self.puzzle_review_mode:
                     if pygame.Rect(330,210,66,28).collidepoint(pos): self.puzzle_prev_step()
@@ -1028,14 +1259,17 @@ class App:
                     if data.get("online"):
                         self.network_state="online"
                         self.network_latency=data.get("latency")
-                        self.network_detail=f"Lichess reachable · {self.network_latency} ms"
+                        self.network_cold_latency=data.get("cold_latency")
+                        self.network_detail=f"Lichess API warm TTFB · {self.network_latency} ms"
                     else:
                         self.network_state="offline"
                         self.network_latency=None
+                        self.network_cold_latency=None
                         self.network_detail=data.get("error","Could not reach Lichess")
                 elif kind=="event": self.process_event(data)
                 elif kind=="start_gid": self.start_gid(data)
                 elif kind=="game": self.process_game(data)
+                elif kind=="move_result": self.handle_move_result(data)
                 elif kind=="puzzle": self.process_puzzle(data)
                 elif kind=="puzzle_error":
                     self.puzzle_loading=False
