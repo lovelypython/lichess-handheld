@@ -1,4 +1,4 @@
-# MSP4021 / ST7796S + XPT2046 wiring — v1.0.6
+# MSP4021 / ST7796S + XPT2046 wiring — v1.0.7
 
 For the first build, only connect the Waveshare ESP32-C5 board and the 4.0" display module.
 

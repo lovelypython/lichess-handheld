@@ -4,8 +4,8 @@ void WiFiManagerLite::loadExtra() {
   // Open read/write so a fresh board creates the namespace instead of logging
   // an expected NVS NOT_FOUND error on first boot.
   prefs_.begin("wifi-extra", false);
-  extraSSID_ = prefs_.getString("ssid", "");
-  extraPassword_ = prefs_.getString("pass", "");
+  extraSSID_ = prefs_.isKey("ssid") ? prefs_.getString("ssid", "") : String();
+  extraPassword_ = prefs_.isKey("pass") ? prefs_.getString("pass", "") : String();
   prefs_.end();
 }
 
