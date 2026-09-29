@@ -15,8 +15,12 @@ static constexpr int PIN_TFT_DC    = 24;
 static constexpr int PIN_TFT_RST   = 0;
 static constexpr int PIN_TFT_BL    = 3;   // MSP4021 LED = active-HIGH backlight control input
 
-static constexpr int PIN_TOUCH_CS  = 1;
-static constexpr int PIN_TOUCH_IRQ = 4;
+// XPT2046 uses separate, software-driven SPI pins on ESP32-C5.
+static constexpr int PIN_TOUCH_SCK  = 5;
+static constexpr int PIN_TOUCH_MOSI = 7;   // T_DIN
+static constexpr int PIN_TOUCH_MISO = 25;  // T_DO
+static constexpr int PIN_TOUCH_CS   = 1;
+static constexpr int PIN_TOUCH_IRQ  = 4;
 
 // MSP4021 has an onboard backlight transistor. LED is a logic/PWM control input,
 // so it goes to GPIO3 rather than consuming the ESP board's only 3V3 header pin.
@@ -26,7 +30,7 @@ static constexpr int PIN_TOUCH_IRQ = 4;
 static constexpr int SCREEN_W = 480;
 static constexpr int SCREEN_H = 320;
 static constexpr uint32_t TFT_SPI_HZ = 30000000;
-static constexpr uint32_t TOUCH_SPI_HZ = 2000000;
+static constexpr uint32_t TOUCH_SPI_HALF_PERIOD_US = 1;
 
 // Normal screen blanking. Touch IRQ remains alive and wakes the display.
 static constexpr uint32_t SCREEN_IDLE_MS = 300000;  // 5 min; set 0 to disable

@@ -12,7 +12,7 @@
 
 SPIClass displaySPI(FSPI);
 ST7796Display tft(displaySPI);
-XPT2046Touch touch(displaySPI);
+XPT2046Touch touch;
 WiFiManagerLite wifiMgr;
 LichessClient api;
 QueueHandle_t netQueue=nullptr;
@@ -352,7 +352,7 @@ String serialLine;
 Wi-Fi credentials are configured locally and are not stored in this repository.
 
 void setup(){
-  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.3");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
+  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.4");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
 Wi-Fi credentials are configured locally and are not stored in this repository.
   if(connected){statusText=String("Connected to ")+WiFi.SSID();screen=Screen::HOME;ensureApi();redraw();}else{statusText="Choose a Wi-Fi network";refreshNetworks();}lastActivityMs=millis();
 }

@@ -1,4 +1,4 @@
-# MSP4021 / ST7796S + XPT2046 wiring — v1.0
+# MSP4021 / ST7796S + XPT2046 wiring — v1.0.4
 
 For the first build, only connect the Waveshare ESP32-C5 board and the 4.0" display module.
 
@@ -9,14 +9,14 @@ For the first build, only connect the Waveshare ESP32-C5 board and the 4.0" disp
 | CS | GPIO23 | LCD chip select |
 | RESET | GPIO0 | LCD reset |
 | DC/RS | GPIO24 | LOW command / HIGH data |
-| SDI (MOSI) | GPIO8 | Shared SPI MOSI |
-| SCK | GPIO10 | Shared SPI clock |
+| SDI (MOSI) | GPIO8 | LCD hardware-SPI MOSI |
+| SCK | GPIO10 | LCD hardware-SPI clock |
 | **LED** | **GPIO3** | Backlight control; HIGH=on, LOW=off; no 3V3 splitter needed |
-| SDO (MISO) | GPIO9 | Shared SPI MISO |
-| T_CLK | GPIO10 | Touch shares SPI clock |
+| SDO (MISO) | GPIO9 | LCD hardware-SPI MISO |
+| T_CLK | **GPIO5** | Touch software-SPI clock |
 | T_CS | GPIO1 | Touch chip select |
-| T_DIN | GPIO8 | Touch shares MOSI |
-| T_DO | GPIO9 | Touch shares MISO |
+| T_DIN | **GPIO7** | Touch software-SPI MOSI |
+| T_DO | **GPIO25** | Touch software-SPI MISO |
 | T_IRQ | GPIO4 | Touch interrupt, active LOW |
 
 SD-card pins are not connected in v1.0.
@@ -40,3 +40,5 @@ This also gives real screen blanking:
 - GPIO27 drives the onboard RGB LED.
 - GPIO28 is BOOT.
 - GPIO3 is exposed and is used only for LCD backlight control here.
+- The ESP32-C5 has one general-purpose hardware SPI controller, so the LCD uses
+  hardware SPI and XPT2046 uses an independent software SPI bus on GPIO5/7/25.

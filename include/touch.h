@@ -1,6 +1,5 @@
 #pragma once
 #include <Arduino.h>
-#include <SPI.h>
 #include <Preferences.h>
 #include "config.h"
 #include "display.h"
@@ -15,7 +14,7 @@ struct TouchPoint {
 
 class XPT2046Touch {
  public:
-  explicit XPT2046Touch(SPIClass& spi) : spi_(spi) {}
+  XPT2046Touch() = default;
   void begin();
   bool readRaw(uint16_t& x, uint16_t& y);
   TouchPoint read();
@@ -26,13 +25,13 @@ class XPT2046Touch {
   void useDefaultCalibration(bool persist = true);
 
  private:
-  SPIClass& spi_;
   Preferences prefs_;
   bool calibrated_ = false;
   bool usingDefaultCalibration_ = false;
   float a_=0, b_=0, c_=0, d_=0, e_=0, f_=0;
 
   uint16_t read12(uint8_t command);
+  uint8_t transfer8(uint8_t value);
   void load();
   void save();
   bool solveAffine(const float raw[][2], const float scr[][2], size_t count);

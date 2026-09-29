@@ -1,6 +1,6 @@
 #include "touch.h"
 
-static constexpr uint8_t TOUCH_CAL_VERSION = 3;
+static constexpr uint8_t TOUCH_CAL_VERSION = 4;
 static constexpr uint16_t TOUCH_RAW_MIN = 200;
 static constexpr uint16_t TOUCH_RAW_MAX = 3900;
 static constexpr uint32_t CAL_TAP_TIMEOUT_MS = 12000;
@@ -13,15 +13,34 @@ static uint16_t median5(uint16_t* v) {
 }
 
 void XPT2046Touch::begin() {
+  pinMode(PIN_TOUCH_SCK, OUTPUT);
+  pinMode(PIN_TOUCH_MOSI, OUTPUT);
+  pinMode(PIN_TOUCH_MISO, INPUT);
   pinMode(PIN_TOUCH_CS, OUTPUT);
   pinMode(PIN_TOUCH_IRQ, INPUT_PULLUP);
+  digitalWrite(PIN_TOUCH_SCK, LOW);
+  digitalWrite(PIN_TOUCH_MOSI, LOW);
   digitalWrite(PIN_TOUCH_CS, HIGH);
   load();
 }
 
+uint8_t XPT2046Touch::transfer8(uint8_t value) {
+  uint8_t input = 0;
+  for (uint8_t mask = 0x80; mask; mask >>= 1) {
+    digitalWrite(PIN_TOUCH_SCK, LOW);
+    digitalWrite(PIN_TOUCH_MOSI, (value & mask) ? HIGH : LOW);
+    delayMicroseconds(TOUCH_SPI_HALF_PERIOD_US);
+    digitalWrite(PIN_TOUCH_SCK, HIGH);
+    input = uint8_t((input << 1) | (digitalRead(PIN_TOUCH_MISO) ? 1 : 0));
+    delayMicroseconds(TOUCH_SPI_HALF_PERIOD_US);
+  }
+  digitalWrite(PIN_TOUCH_SCK, LOW);
+  return input;
+}
+
 uint16_t XPT2046Touch::read12(uint8_t command) {
-  spi_.transfer(command);
-  uint16_t v = (uint16_t(spi_.transfer(0)) << 8) | spi_.transfer(0);
+  transfer8(command);
+  uint16_t v = (uint16_t(transfer8(0)) << 8) | transfer8(0);
   return (v >> 3) & 0x0FFF;
 }
 
@@ -29,7 +48,6 @@ bool XPT2046Touch::readRaw(uint16_t& x, uint16_t& y) {
   if (digitalRead(PIN_TOUCH_IRQ) != LOW) return false;
 
   uint16_t xs[5], ys[5];
-  spi_.beginTransaction(SPISettings(TOUCH_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, HIGH);
   digitalWrite(PIN_TOUCH_CS, LOW);
   for (int i=0;i<5;i++) {
@@ -37,7 +55,6 @@ bool XPT2046Touch::readRaw(uint16_t& x, uint16_t& y) {
     ys[i] = read12(0x90);
   }
   digitalWrite(PIN_TOUCH_CS, HIGH);
-  spi_.endTransaction();
 
   x=median5(xs); y=median5(ys);
   // A real press on this panel stays well away from the ADC rails. 0,0 means
