@@ -8,7 +8,6 @@ Use PlatformIO to build the selected revision locally. No compiled firmware imag
 
 ```bash
 pio run -e esp32c5
-pio run -e esp32c5 -t upload
 ```
 
 ## Local configuration
