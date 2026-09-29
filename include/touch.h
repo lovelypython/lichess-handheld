@@ -20,13 +20,16 @@ class XPT2046Touch {
   bool readRaw(uint16_t& x, uint16_t& y);
   TouchPoint read();
   bool calibrated() const { return calibrated_; }
+  bool usingDefaultCalibration() const { return usingDefaultCalibration_; }
   void runCalibration(ST7796Display& tft);
   void clearCalibration();
+  void useDefaultCalibration(bool persist = true);
 
  private:
   SPIClass& spi_;
   Preferences prefs_;
   bool calibrated_ = false;
+  bool usingDefaultCalibration_ = false;
   float a_=0, b_=0, c_=0, d_=0, e_=0, f_=0;
 
   uint16_t read12(uint8_t command);

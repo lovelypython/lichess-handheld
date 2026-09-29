@@ -349,10 +349,10 @@ static void handleTouch(int x,int y){lastActivityMs=millis();
 }
 
 String serialLine;
-static void serialCommand(String s){s.trim();if(s=="wifi scan")refreshNetworks();else if(s=="wifi reconnect"){if(wifiMgr.autoConnect()){ensureApi();screen=Screen::HOME;redraw();}else refreshNetworks();}else if(s=="wifi clear"){wifiMgr.clearExtra();refreshNetworks();}else if(s=="touch recalibrate"){wakeScreen();touch.clearCalibration();touch.runCalibration(tft);redraw();}else if(s=="screen sleep")sleepScreen();else if(s=="screen wake")wakeScreen();else if(s=="status")Serial.printf("screen=%d wifi=%s account=%s game=%s heap=%u\n",int(screen),wifiMgr.currentSSID().c_str(),accountName.c_str(),gameId.c_str(),ESP.getFreeHeap());else Serial.println("Commands: wifi scan | wifi reconnect | wifi clear | touch recalibrate | screen sleep | screen wake | status");}
+Wi-Fi credentials are configured locally and are not stored in this repository.
 
 void setup(){
-  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.2");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
+  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.3");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
 Wi-Fi credentials are configured locally and are not stored in this repository.
   if(connected){statusText=String("Connected to ")+WiFi.SSID();screen=Screen::HOME;ensureApi();redraw();}else{statusText="Choose a Wi-Fi network";refreshNetworks();}lastActivityMs=millis();
 }

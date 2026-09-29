@@ -1,6 +1,11 @@
 #include "touch.h"
 
-static constexpr uint8_t TOUCH_CAL_VERSION = 2;
+static constexpr uint8_t TOUCH_CAL_VERSION = 3;
+static constexpr uint16_t TOUCH_RAW_MIN = 200;
+static constexpr uint16_t TOUCH_RAW_MAX = 3900;
+static constexpr uint32_t CAL_TAP_TIMEOUT_MS = 12000;
+static constexpr uint32_t CAL_SAMPLE_TIMEOUT_MS = 700;
+static constexpr uint32_t CAL_RELEASE_TIMEOUT_MS = 1500;
 
 static uint16_t median5(uint16_t* v) {
   for (int i=0;i<5;i++) for (int j=i+1;j<5;j++) if (v[j]<v[i]) { auto t=v[i];v[i]=v[j];v[j]=t; }
@@ -35,6 +40,16 @@ bool XPT2046Touch::readRaw(uint16_t& x, uint16_t& y) {
   spi_.endTransaction();
 
   x=median5(xs); y=median5(ys);
+  // A real press on this panel stays well away from the ADC rails. 0,0 means
+  // IRQ is active but no position data is arriving from XPT2046 T_DO/MISO.
+  if (x < 16 || y < 16 || x > 4079 || y > 4079) {
+    static uint32_t lastWarningMs = 0;
+    if (millis() - lastWarningMs >= 500) {
+      Serial.printf("[Touch] invalid raw=%u,%u (check T_DO/MISO, T_CS and power)\n", x, y);
+      lastWarningMs = millis();
+    }
+    return false;
+  }
   return true;
 }
 
@@ -54,16 +69,19 @@ void XPT2046Touch::load() {
   prefs_.begin("touch", false);
   calibrated_ = prefs_.getBool("ok", false) &&
                 prefs_.getUChar("ver", 0) == TOUCH_CAL_VERSION;
+  usingDefaultCalibration_ = prefs_.getBool("fallback", false);
   a_=prefs_.getFloat("a",0); b_=prefs_.getFloat("b",0); c_=prefs_.getFloat("c",0);
   d_=prefs_.getFloat("d",0); e_=prefs_.getFloat("e",0); f_=prefs_.getFloat("f",0);
   calibrated_ = calibrated_ && isfinite(a_) && isfinite(b_) && isfinite(c_) &&
                 isfinite(d_) && isfinite(e_) && isfinite(f_);
+  if (!calibrated_) usingDefaultCalibration_ = false;
   prefs_.end();
 }
 void XPT2046Touch::save() {
   prefs_.begin("touch", false);
   prefs_.putBool("ok", true);
   prefs_.putUChar("ver", TOUCH_CAL_VERSION);
+  prefs_.putBool("fallback", usingDefaultCalibration_);
   prefs_.putFloat("a",a_); prefs_.putFloat("b",b_); prefs_.putFloat("c",c_);
   prefs_.putFloat("d",d_); prefs_.putFloat("e",e_); prefs_.putFloat("f",f_);
   prefs_.end();
@@ -71,6 +89,23 @@ void XPT2046Touch::save() {
 void XPT2046Touch::clearCalibration() {
   prefs_.begin("touch", false); prefs_.clear(); prefs_.end();
   calibrated_=false;
+  usingDefaultCalibration_=false;
+}
+
+void XPT2046Touch::useDefaultCalibration(bool persist) {
+  // MSP4021/XPT2046 landscape fallback: touch Y drives screen X, while touch
+  // X drives the inverted screen Y axis. User calibration replaces this map.
+  const float rawSpan = float(TOUCH_RAW_MAX - TOUCH_RAW_MIN);
+  a_ = 0.0f;
+  b_ = float(SCREEN_W - 1) / rawSpan;
+  c_ = -b_ * TOUCH_RAW_MIN;
+  d_ = -float(SCREEN_H - 1) / rawSpan;
+  e_ = 0.0f;
+  f_ = float(SCREEN_H - 1) - d_ * TOUCH_RAW_MIN;
+  calibrated_ = true;
+  usingDefaultCalibration_ = true;
+  if (persist) save();
+  Serial.println("[Touch] built-in default calibration enabled");
 }
 
 static float det3(const float m[3][3]) {
@@ -126,27 +161,36 @@ void XPT2046Touch::runCalibration(ST7796Display& tft) {
   const float scr[5][2]={{48,48},{SCREEN_W-48,48},{SCREEN_W-48,SCREEN_H-48},
                          {48,SCREEN_H-48},{SCREEN_W/2.0f,SCREEN_H/2.0f}};
   float raw[5][2];
+  bool captureFailed=false;
   for(int i=0;i<5;i++){
     drawTarget(tft,int(scr[i][0]),int(scr[i][1]));
-    while(digitalRead(PIN_TOUCH_IRQ)!=LOW) delay(5);
+    uint32_t waitStarted=millis();
+    while(digitalRead(PIN_TOUCH_IRQ)!=LOW && millis()-waitStarted<CAL_TAP_TIMEOUT_MS) delay(5);
+    if(digitalRead(PIN_TOUCH_IRQ)!=LOW){captureFailed=true;break;}
     uint16_t xs[11],ys[11];int n=0;
-    while(digitalRead(PIN_TOUCH_IRQ)==LOW&&n<11){
+    uint32_t sampleStarted=millis();
+    while(digitalRead(PIN_TOUCH_IRQ)==LOW&&n<11&&millis()-sampleStarted<CAL_SAMPLE_TIMEOUT_MS){
       uint16_t x,y;
       if(readRaw(x,y)){xs[n]=x;ys[n]=y;n++;}
       delay(5);
     }
-    while(digitalRead(PIN_TOUCH_IRQ)==LOW)delay(3);
-    if(n==0){i--;continue;}
+    uint32_t releaseStarted=millis();
+    while(digitalRead(PIN_TOUCH_IRQ)==LOW&&millis()-releaseStarted<CAL_RELEASE_TIMEOUT_MS)delay(3);
+    if(n==0||digitalRead(PIN_TOUCH_IRQ)==LOW){captureFailed=true;break;}
     for(int a=0;a<n;a++)for(int b=a+1;b<n;b++)if(xs[b]<xs[a]){uint16_t t=xs[a];xs[a]=xs[b];xs[b]=t;}
     for(int a=0;a<n;a++)for(int b=a+1;b<n;b++)if(ys[b]<ys[a]){uint16_t t=ys[a];ys[a]=ys[b];ys[b]=t;}
     raw[i][0]=xs[n/2];raw[i][1]=ys[n/2];
     delay(100);
   }
-  calibrated_=solveAffine(raw,scr,5);
-  if(calibrated_) save();
+  calibrated_=!captureFailed&&solveAffine(raw,scr,5);
+  if(calibrated_){usingDefaultCalibration_=false;save();}
+  else useDefaultCalibration(true);
   tft.fillScreen(ST7796Display::rgb565(18,20,24));
-  tft.drawText(24,140, calibrated_ ? "Touch calibrated" : "Calibration failed",
-               calibrated_?ST7796Display::rgb565(80,220,120):ST7796Display::rgb565(255,80,80),
-               ST7796Display::rgb565(18,20,24),2);
-  delay(1000);
+  if(usingDefaultCalibration_){
+    tft.drawText(24,125,"Calibration failed",ST7796Display::rgb565(255,176,32),ST7796Display::rgb565(18,20,24),2);
+    tft.drawText(24,160,"Using default touch map",ST7796Display::rgb565(80,220,120),ST7796Display::rgb565(18,20,24),2);
+  }else{
+    tft.drawText(24,140,"Touch calibrated",ST7796Display::rgb565(80,220,120),ST7796Display::rgb565(18,20,24),2);
+  }
+  delay(1400);
 }
