@@ -54,6 +54,5 @@ static constexpr BuiltinWiFi BUILTIN_WIFI[] = {
 static constexpr size_t BUILTIN_WIFI_COUNT =
     sizeof(BUILTIN_WIFI) / sizeof(BUILTIN_WIFI[0]);
 
-// Optional additional Wi-Fi is saved in NVS through Serial:
-//   wifi add MySSID|MyPassword
-// It is tried after the three built-in networks.
+// One additional Wi-Fi can be selected on the touchscreen and is saved in
+// NVS. It is tried after these three built-in networks.

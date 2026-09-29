@@ -1,0 +1,1 @@
+Precompiled firmware images are intentionally excluded; build from source with PlatformIO.
