@@ -317,12 +317,19 @@ static void puzzlePrev(){if(!puzzlePlayedCount){statusText="No previous move";re
 static void puzzleNext(){if(!puzzleReview||puzzleHistoryPly>=puzzlePlayedCount){statusText="No later played move";return;}puzzleHistoryPly++;rebuildPuzzle(puzzleHistoryPly);redraw();}
 static void puzzleResume(){puzzleReview=false;puzzleHistoryPly=puzzlePlayedCount;rebuildPuzzle(puzzlePlayedCount);statusText="Returned to live puzzle";redraw();}
 
-static void homeClick(int x,int y){if(hit({18,88,140,110},x,y))screen=Screen::ONLINE;else if(hit({170,88,140,110},x,y))screen=Screen::AI;else if(hit({322,88,140,110},x,y))screen=Screen::PUZZLE;else if(hit({322,216,140,34},x,y)||hit({348,14,114,32},x,y)){refreshNetworks();return;}redraw();}
+static void homeClick(int x,int y){
+  if(hit({18,88,140,110},x,y)){screen=Screen::ONLINE;redraw();}
+  else if(hit({170,88,140,110},x,y)){screen=Screen::AI;redraw();}
+  else if(hit({322,88,140,110},x,y)){screen=Screen::PUZZLE;redraw();}
+  else if(hit({322,216,140,34},x,y)||hit({348,14,114,32},x,y))refreshNetworks();
+}
 static void selectorClick(int x,int y){
   if(hit({390,12,72,30},x,y)){screen=Screen::HOME;redraw();return;}
-  if(screen==Screen::AI){for(int i=1;i<=8;i++)if(hit({18+(i-1)*55,82,48,34},x,y))aiLevel=i;for(int i=0;i<4;i++)if(hit({18+i*108,164,96,36},x,y))aiTimeIndex=i;if(hit({18,224,444,44},x,y)&&loggedIn){statusText="Starting Lichess AI...";api.createAI(aiLevel,AI_TIMES[aiTimeIndex][0],AI_TIMES[aiTimeIndex][1]);}}
-  else if(screen==Screen::ONLINE){for(int i=0;i<4;i++)if(hit({18+i*108,92,96,36},x,y))onlineTimeIndex=i;if(hit({18,151,210,38},x,y))onlineRated=false;if(hit({252,151,210,38},x,y))onlineRated=true;if(hit({18,218,444,44},x,y)&&loggedIn)screen=Screen::ONLINE_CONFIRM;}
-  else{for(int i=0;i<5;i++)if(hit({18+i*89,90,82,36},x,y))puzzleDiffIndex=i;if(hit({18,160,444,44},x,y)&&WiFi.status()==WL_CONNECTED)requestPuzzle(false);}redraw();
+  bool handled=false;
+  if(screen==Screen::AI){for(int i=1;i<=8;i++)if(hit({18+(i-1)*55,82,48,34},x,y)){aiLevel=i;handled=true;break;}for(int i=0;i<4;i++)if(hit({18+i*108,164,96,36},x,y)){aiTimeIndex=i;handled=true;break;}if(hit({18,224,444,44},x,y)&&loggedIn){statusText="Starting Lichess AI...";api.createAI(aiLevel,AI_TIMES[aiTimeIndex][0],AI_TIMES[aiTimeIndex][1]);handled=true;}}
+  else if(screen==Screen::ONLINE){for(int i=0;i<4;i++)if(hit({18+i*108,92,96,36},x,y)){onlineTimeIndex=i;handled=true;break;}if(hit({18,151,210,38},x,y)){onlineRated=false;handled=true;}if(hit({252,151,210,38},x,y)){onlineRated=true;handled=true;}if(hit({18,218,444,44},x,y)&&loggedIn){screen=Screen::ONLINE_CONFIRM;handled=true;}}
+  else{for(int i=0;i<5;i++)if(hit({18+i*89,90,82,36},x,y)){puzzleDiffIndex=i;handled=true;break;}if(hit({18,160,444,44},x,y)&&WiFi.status()==WL_CONNECTED){requestPuzzle(false);return;}}
+  if(handled)redraw();
 }
 static void networksClick(int x,int y){
   if(hit({390,12,72,30},x,y)){screen=Screen::HOME;redraw();return;}if(hit({18,274,112,34},x,y)){refreshNetworks();return;}if(hit({142,274,72,34},x,y)&&networkPage>0){networkPage--;redraw();return;}if(hit({226,274,72,34},x,y)&&(networkPage+1)*5<wifiMgr.scanCount()){networkPage++;redraw();return;}
@@ -333,11 +340,11 @@ static void passwordClick(int x,int y){const char**rows=keyboardMode==0?KEY_LOWE
 
 static void handleTouch(int x,int y){lastActivityMs=millis();
   if(screen==Screen::HOME){homeClick(x,y);return;}if(screen==Screen::ONLINE||screen==Screen::AI||screen==Screen::PUZZLE){selectorClick(x,y);return;}if(screen==Screen::NETWORKS){networksClick(x,y);return;}if(screen==Screen::WIFI_PASSWORD){passwordClick(x,y);return;}
-  if(screen==Screen::ONLINE_CONFIRM){if(hit({18,250,210,44},x,y))screen=Screen::ONLINE;else if(hit({252,250,210,44},x,y)&&loggedIn){screen=Screen::ONLINE_WAIT;api.seek(ONLINE_TIMES[onlineTimeIndex][0],ONLINE_TIMES[onlineTimeIndex][1],onlineRated);}redraw();return;}
+  if(screen==Screen::ONLINE_CONFIRM){if(hit({18,250,210,44},x,y)){screen=Screen::ONLINE;redraw();}else if(hit({252,250,210,44},x,y)&&loggedIn){screen=Screen::ONLINE_WAIT;api.seek(ONLINE_TIMES[onlineTimeIndex][0],ONLINE_TIMES[onlineTimeIndex][1],onlineRated);redraw();}return;}
   if(screen==Screen::ONLINE_WAIT){if(hit({18,232,444,46},x,y)){api.cancelSeek();screen=Screen::ONLINE;statusText="Search cancelled";redraw();}return;}
-  if(screen==Screen::PUZZLE_ANSWER){if(hit({18,276,210,32},x,y))screen=Screen::PUZZLE_GAME;else if(hit({252,276,210,32},x,y))requestPuzzle(true);redraw();return;}
+  if(screen==Screen::PUZZLE_ANSWER){if(hit({18,276,210,32},x,y)){screen=Screen::PUZZLE_GAME;redraw();}else if(hit({252,276,210,32},x,y))requestPuzzle(true);return;}
   if((screen==Screen::GAME||screen==Screen::PUZZLE_GAME)&&x<320){clickBoard(x,y);return;}
-  if(screen==Screen::GAME){if(hit({330,226,140,32},x,y)){api.stopGameStream();screen=Screen::HOME;}else if(hit({330,264,140,32},x,y))api.resign(gameId);redraw();return;}
+  if(screen==Screen::GAME){if(hit({330,226,140,32},x,y)){api.stopGameStream();screen=Screen::HOME;redraw();}else if(hit({330,264,140,32},x,y)){api.resign(gameId);redraw();}return;}
   if(screen==Screen::PUZZLE_GAME){if(puzzleReview){if(hit({330,210,66,28},x,y))puzzlePrev();else if(hit({404,210,66,28},x,y))puzzleNext();else if(hit({330,244,66,28},x,y))puzzleResume();else if(hit({404,244,66,28},x,y)){puzzleAnswerShown=true;screen=Screen::PUZZLE_ANSWER;redraw();}}else{if(hit({330,210,66,28},x,y))showHint();else if(hit({404,210,66,28},x,y)){puzzleAnswerShown=true;screen=Screen::PUZZLE_ANSWER;redraw();}else if(hit({330,244,66,28},x,y))puzzlePrev();}if(hit({330,278,66,28},x,y)){screen=Screen::HOME;redraw();}else if(hit({404,278,66,28},x,y))requestPuzzle(true);}
 }
 
@@ -345,7 +352,7 @@ String serialLine;
 static void serialCommand(String s){s.trim();if(s=="wifi scan")refreshNetworks();else if(s=="wifi reconnect"){if(wifiMgr.autoConnect()){ensureApi();screen=Screen::HOME;redraw();}else refreshNetworks();}else if(s=="wifi clear"){wifiMgr.clearExtra();refreshNetworks();}else if(s=="touch recalibrate"){wakeScreen();touch.clearCalibration();touch.runCalibration(tft);redraw();}else if(s=="screen sleep")sleepScreen();else if(s=="screen wake")wakeScreen();else if(s=="status")Serial.printf("screen=%d wifi=%s account=%s game=%s heap=%u\n",int(screen),wifiMgr.currentSSID().c_str(),accountName.c_str(),gameId.c_str(),ESP.getFreeHeap());else Serial.println("Commands: wifi scan | wifi reconnect | wifi clear | touch recalibrate | screen sleep | screen wake | status");}
 
 void setup(){
-  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.1");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
+  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.2");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
 Wi-Fi credentials are configured locally and are not stored in this repository.
   if(connected){statusText=String("Connected to ")+WiFi.SSID();screen=Screen::HOME;ensureApi();redraw();}else{statusText="Choose a Wi-Fi network";refreshNetworks();}lastActivityMs=millis();
 }
@@ -356,7 +363,7 @@ void loop(){
   if(screenAsleep){if(digitalRead(PIN_TOUCH_IRQ)==LOW){wakeScreen();while(digitalRead(PIN_TOUCH_IRQ)==LOW)delay(5);lastTouchMs=millis();}delay(5);return;}
   if(puzzleReplyPending&&millis()>=puzzleReplyDue){String u=puzzleSolution[puzzleIndex];ChessMove m;ChessBoard before=board;if(board.applyUCI(u,&m)){lastMove=m;puzzlePlayed[puzzlePlayedCount++]=u;puzzleIndex++;startAnimation(before,m);statusText=puzzleIndex>=puzzleSolutionCount?"Solved!":"Your move";}else statusText="Puzzle reply mismatch";puzzleReplyPending=false;drawPuzzleSide();}
   updateAnimation();
-  if(millis()-lastTouchMs>120&&digitalRead(PIN_TOUCH_IRQ)==LOW){TouchPoint p=touch.read();if(p.pressed){handleTouch(p.x,p.y);while(digitalRead(PIN_TOUCH_IRQ)==LOW)delay(5);lastTouchMs=millis();}}
+  if(millis()-lastTouchMs>120&&digitalRead(PIN_TOUCH_IRQ)==LOW){TouchPoint p=touch.read();if(p.pressed){Serial.printf("[Touch] raw=%u,%u screen=%d,%d page=%d\n",p.rawX,p.rawY,p.x,p.y,int(screen));handleTouch(p.x,p.y);while(digitalRead(PIN_TOUCH_IRQ)==LOW)delay(5);lastTouchMs=millis();}}
   if(SCREEN_IDLE_MS&&millis()-lastActivityMs>=SCREEN_IDLE_MS){sleepScreen();return;}
   static uint32_t lastClock=0;if(screen==Screen::GAME&&millis()-lastClock>500){lastClock=millis();drawGameSide();}
   delay(3);

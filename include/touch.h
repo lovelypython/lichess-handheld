@@ -32,5 +32,5 @@ class XPT2046Touch {
   uint16_t read12(uint8_t command);
   void load();
   void save();
-  bool solveAffine(const float raw[3][2], const float scr[3][2]);
+  bool solveAffine(const float raw[][2], const float scr[][2], size_t count);
 };
