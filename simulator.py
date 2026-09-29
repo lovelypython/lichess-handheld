@@ -285,6 +285,11 @@ class App:
             gid=g.get("gameId") or g.get("id")
             if gid:
                 self.api.seek_stop.set()
+                color = g.get("color")
+                if color == "white":
+                    self.my_color = chess.WHITE
+                elif color == "black":
+                    self.my_color = chess.BLACK
                 self.start_gid(gid)
         elif t=="challenge":
             ch=d.get("challenge",{})
@@ -311,9 +316,22 @@ class App:
             if self.account_id and self.account_id==bid:
                 self.my_color=chess.BLACK
                 self.opponent=white.get("name") or white.get("id") or "White"
-            else:
+            elif self.account_id and self.account_id==wid:
                 self.my_color=chess.WHITE
                 self.opponent=black.get("name") or black.get("id") or ("Lichess AI" if black.get("aiLevel") else "Black")
+            elif white.get("aiLevel") is not None:
+                # If account lookup is still racing the first game event,
+                # AI identity lets us infer that the human is Black.
+                self.my_color=chess.BLACK
+                self.opponent="Lichess AI"
+            elif black.get("aiLevel") is not None:
+                self.my_color=chess.WHITE
+                self.opponent="Lichess AI"
+            # Otherwise keep the color learned from gameStart.
+            if self.my_color==chess.BLACK:
+                self.opponent=white.get("name") or white.get("id") or self.opponent
+            else:
+                self.opponent=black.get("name") or black.get("id") or self.opponent
             st=d.get("state",{})
             self.apply_moves(st.get("moves",""))
             self.wtime=st.get("wtime"); self.btime=st.get("btime")
@@ -323,26 +341,72 @@ class App:
             self.wtime=d.get("wtime"); self.btime=d.get("btime")
             self.game_status=d.get("status",self.game_status)
 
+    def _build_puzzle_position(self, p, g):
+        """Build exactly the position Lichess presents to the solver.
+
+        Lichess `initialPly` is the zero-based ply index of the final
+        game move that must already be on the board when the puzzle starts.
+        Therefore a PGN must be replayed through `initialPly + 1` plies.
+
+        We also validate that the first solution move is legal. This catches
+        future API/schema changes instead of silently showing the wrong side.
+        """
+        solution = list(p.get("solution") or [])
+        if not solution:
+            raise ValueError("Puzzle has no solution moves")
+
+        if p.get("fen"):
+            # Future-proofing: if Lichess provides a ready-to-solve FEN,
+            # trust it, then validate it below.
+            b = chess.Board(p["fen"])
+        else:
+            pg = chess.pgn.read_game(io.StringIO(g["pgn"]))
+            if pg is None:
+                raise ValueError("Could not parse puzzle PGN")
+
+            moves = list(pg.mainline_moves())
+            initial_ply = int(p["initialPly"])
+            replay_count = initial_ply + 1
+
+            if replay_count < 0 or replay_count > len(moves):
+                raise ValueError(
+                    f"initialPly={initial_ply} needs {replay_count} plies, "
+                    f"but PGN has {len(moves)}"
+                )
+
+            b = pg.board()
+            for m in moves[:replay_count]:
+                b.push(m)
+
+        first = chess.Move.from_uci(solution[0])
+        if first not in b.legal_moves:
+            raise ValueError(
+                f"Puzzle position mismatch: first solution {solution[0]} "
+                f"is not legal (side to move: "
+                f"{'white' if b.turn == chess.WHITE else 'black'})"
+            )
+        return b, solution
+
     def process_puzzle(self,d):
         try:
             p=d["puzzle"]; g=d["game"]
-            if p.get("fen"):
-                b=chess.Board(p["fen"])
-            else:
-                pg=chess.pgn.read_game(io.StringIO(g["pgn"]))
-                b=pg.board()
-                moves=list(pg.mainline_moves())
-                for m in moves[:int(p["initialPly"])]:
-                    b.push(m)
+            b, solution = self._build_puzzle_position(p, g)
+
             self.board=b
+            # The board orientation must follow the actual solver side.
+            # This can be either White or Black.
             self.my_color=b.turn
             self.puzzle_color=b.turn
-            self.puzzle_solution=list(p["solution"])
+            self.puzzle_solution=solution
             self.puzzle_i=0
             self.puzzle_meta=p
             self.last=None; self.selected=None
             self.screen="puzzle_game"
-            self.setstatus(f"Puzzle {p['id']} · rating {p['rating']}")
+
+            side = "White" if b.turn == chess.WHITE else "Black"
+            self.setstatus(
+                f"Puzzle {p['id']} · rating {p['rating']} · {side} to move"
+            )
         except Exception as e:
             self.setstatus(f"Puzzle parse failed: {e}")
 
@@ -378,19 +442,47 @@ class App:
             self.api.move(self.game_id,m.uci())
         else:
             exp=self.puzzle_solution[self.puzzle_i] if self.puzzle_i<len(self.puzzle_solution) else None
-            if m.uci()!=exp:
+
+            # Lichess allows alternate mating moves in mate-in-1 puzzles.
+            alternate_mate = False
+            if m.uci()!=exp and "mateIn1" in self.puzzle_meta.get("themes", []):
+                probe = self.board.copy(stack=False)
+                probe.push(m)
+                alternate_mate = probe.is_checkmate()
+
+            if m.uci()!=exp and not alternate_mate:
                 self.setstatus("Not the puzzle move. Try again.")
                 return
-            self.board.push(m); self.last=m; self.puzzle_i+=1
-            # Auto-play exactly one opponent reply, then hand control back.
+
+            self.board.push(m); self.last=m
+
+            if alternate_mate:
+                self.puzzle_i=len(self.puzzle_solution)
+                self.setstatus("Solved! Checkmate.")
+                return
+
+            self.puzzle_i+=1
+
+            # The solution alternates player move / opponent reply.
+            # Play exactly one opponent reply, then return control to solver.
             if self.puzzle_i<len(self.puzzle_solution):
                 r=chess.Move.from_uci(self.puzzle_solution[self.puzzle_i])
-                if r in self.board.legal_moves:
-                    self.board.push(r); self.last=r; self.puzzle_i+=1
+                if r not in self.board.legal_moves:
+                    self.setstatus(
+                        f"Puzzle data mismatch: reply {r.uci()} is illegal"
+                    )
+                    return
+                self.board.push(r); self.last=r; self.puzzle_i+=1
+
             if self.puzzle_i>=len(self.puzzle_solution):
                 self.setstatus("Solved! Tap Next for another Lichess puzzle.")
             else:
-                self.setstatus("Correct. Continue.")
+                # Defensive check: after the automatic reply it should be
+                # the solver's color again.
+                if self.board.turn != self.puzzle_color:
+                    self.setstatus("Puzzle turn mismatch detected.")
+                else:
+                    self.setstatus("Correct. Continue.")
 
     def draw_board(self):
         for dy in range(8):
@@ -486,11 +578,13 @@ class App:
             self.sc.blit(self.txt("Puzzle",self.f18),(x,10))
             self.sc.blit(self.txt(f"#{p.get('id','')}",self.f15,MUTED),(x,45))
             self.sc.blit(self.txt(f"Rating {p.get('rating','?')}",self.f18),(x,66))
+            side = "White to move" if self.puzzle_color == chess.WHITE else "Black to move"
+            self.sc.blit(self.txt(side,self.f15),(x,92))
             themes=", ".join(p.get("themes",[])[:3])
-            y=104
+            y=116
             for chunk in [themes[i:i+19] for i in range(0,len(themes),19)][:3]:
                 self.sc.blit(self.txt(chunk,self.f12,MUTED),(x,y)); y+=16
-            self.sc.blit(self.txt(f"{self.puzzle_i}/{len(self.puzzle_solution)} moves",self.f15),(x,167))
+            self.sc.blit(self.txt(f"{self.puzzle_i}/{len(self.puzzle_solution)} plies",self.f15),(x,181))
             self.button(pygame.Rect(330,220,140,32),"Home")
             self.button(pygame.Rect(330,260,140,32),"Next")
         self.sc.blit(self.txt(self.status[:24],self.f12,MUTED),(330,302))
