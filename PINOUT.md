@@ -1,4 +1,4 @@
-# MSP4021 / ST7796S + XPT2046 wiring — v0.2
+# MSP4021 / ST7796S + XPT2046 wiring — v0.3
 
 For the first build, only connect the Waveshare ESP32-C5 board and the 4.0" display module.
 
@@ -19,7 +19,7 @@ For the first build, only connect the Waveshare ESP32-C5 board and the 4.0" disp
 | T_DO | GPIO9 | Touch shares MISO |
 | T_IRQ | GPIO4 | Touch interrupt, active LOW |
 
-SD-card pins are not connected in v0.2.
+SD-card pins are not connected in v0.3.
 
 ## Why LED goes to GPIO3
 

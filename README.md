@@ -1,125 +1,68 @@
-# ESP32-C5 Lichess Handheld — hardware firmware v0.2
+# ESP32-C5 Chess Handheld — UI/Wi-Fi firmware v0.3
 
-Target:
+Target hardware:
+
 - Waveshare ESP32-C5-WIFI6-KIT-N32R8-UM
-- MSP4021 4.0" 480×320 ST7796S
-- XPT2046 resistive touch
+- MSP4021 4.0-inch 480x320 ST7796S display
+- XPT2046 resistive touch controller
 
-This is the **first real hardware burn**. It intentionally concentrates on the hardware path that is physically connected right now:
+## What changed from v0.2
 
-1. ST7796S display bring-up
-   - GPIO3-controlled backlight
-   - 60 s automatic sleep
-   - touch-to-wake
-2. XPT2046 touch + first-boot 3-point affine calibration
-3. 320×320 chessboard + 160×320 sidebar
-4. 100 ms piece-move animation
-5. built-in Wi-Fi auto-connect
-6. extra Wi-Fi saved in NVS
-7. 32 MB Flash / 8 MB PSRAM PlatformIO configuration
+v0.2 was a hardware bring-up screen and did not match the Mac v5.5 preview. This revision replaces that debug-first UI with the preview layout:
 
-It is the base for the Lichess API layer. Do not diagnose Lichess/game-stream bugs until this build has proven the screen, touch and Wi-Fi wiring.
+- `Chess Handheld` home page
+- Online, AI, and Puzzle cards
+- matching selector pages and controls
+- clickable network status and Network button
+- on-device Wi-Fi scan list
+- tap a network, type its password on screen, connect, and save it
+Wi-Fi credentials are configured locally and are not stored in this repository.
+- screen sleep after **5 minutes** of no touch or serial activity
+- first touch wakes the screen without activating a button
 
-## Built-in Wi-Fi order
+The Lichess game/API engine is not included in this UI/Wi-Fi revision yet. The three mode pages intentionally report that their API action is not linked instead of pretending a game started.
 
-1. REPLACE_WITH_YOUR_WIFI_SSID
-2. REPLACE_WITH_YOUR_WIFI_SSID
-3. REPLACE_WITH_YOUR_WIFI_SSID
+## Flash on macOS
 
-An additional network can be stored from USB serial without recompiling:
+Connect the board through the `USB Single Serial` port, then run:
 
-```text
-wifi add YourSSID|YourPassword
-wifi reconnect
+```bash
+chmod +x flash.command
+UPLOAD_PORT=/dev/cu.usbmodem5C940959191 ./flash.command
 ```
 
-Other useful commands:
+If the device number changes, replace the port with the current `/dev/cu.usbmodem...` value.
+
+## Wi-Fi behavior
+
+Wi-Fi credentials are configured locally and are not stored in this repository.
+
+The Wi-Fi page supports:
+
+- signal strength and security status
+- five networks per page
+Wi-Fi credentials are configured locally and are not stored in this repository.
+- password entry with digits, lower-case letters, upper-case letters, `.`, `_`, `-`, and `@`
+- storage of the selected custom network in NVS
+
+Useful serial commands:
 
 ```text
 wifi scan
+wifi reconnect
 wifi clear
 touch recalibrate
+screen sleep
+screen wake
 status
 ```
 
-## One-command flash on macOS
+## Display sleep
 
-```bash
-cd lichess_handheld_esp32c5_v01
-chmod +x flash.command
-./flash.command
-```
+`SCREEN_IDLE_MS` is `300000` milliseconds in `include/config.h`. The display and backlight turn off after five minutes; the XPT2046 interrupt remains active for touch-to-wake.
 
-The script:
-- uses `$HOME/.platformio/penv/bin/pio` when present;
-- auto-detects `/dev/cu.usbmodem*`, `/dev/cu.wchusbserial*`, or `/dev/cu.usbserial*`;
-- builds, uploads, then opens the serial monitor.
+## Notes
 
-If upload cannot connect:
-1. hold BOOT,
-2. tap RESET,
-3. release RESET,
-4. release BOOT,
-5. run `./flash.command` again.
-
-## Chess-piece artwork hook
-
-The program includes a simple vector fallback so the first burn works immediately.
-
-A converter is included for **locally supplied** PNGs:
-- put `wp.png ... bk.png` in `assets_user/neo/`
-- run `python3 tools/encode_pieces.py`
-- rebuild/flash
-
-It converts each piece to 36×36 RGB565 plus a 1-bit transparency mask and compiles it into firmware.
-
-## If the panel is mirrored/rotated
-
-Edit only this line in `include/config.h`:
-
-```cpp
-static constexpr uint8_t ST7796_MADCTL = 0x28;
-```
-
-The wiring does not change.
-
-## First-boot test
-
-Expected sequence:
-1. backlight turns on;
-2. dark splash screen appears;
-3. Wi-Fi starts scanning;
-4. touch calibration shows three orange targets;
-5. chessboard appears;
-6. tap a piece and another square to see the ~100 ms move animation.
-
-If the backlight is on but the LCD stays white, stop and send:
-- a photo of the wiring,
-- the serial log from boot,
-- whether the calibration targets ever appeared.
-
-
-## Screen sleep / backlight
-
-Unlike v0.1, **do not connect LED to 3V3**.
-
-Connect:
-
-```text
-MSP4021 LED -> ESP32-C5 GPIO3
-```
-
-The module already contains its own backlight transistor/driver. The firmware:
-- turns the ST7796S display off and enters sleep after 60 seconds without input;
-- drives GPIO3 LOW so the backlight is actually dark;
-- keeps XPT2046 alive;
-- uses the first touch only to wake the screen.
-
-Manual serial commands:
-
-```text
-screen sleep
-screen wake
-```
-
-The timeout is `SCREEN_IDLE_MS` in `include/config.h`; set it to `0` to disable automatic blanking.
+- The first boot still runs the three-point touch calibration.
+- GPIO and screen-controller settings are unchanged from v0.2.
+- The firmware removes the normal first-boot `Preferences.cpp: nvs_open failed: NOT_FOUND` noise by creating the preference namespaces before reading them.

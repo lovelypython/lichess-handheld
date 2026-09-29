@@ -29,7 +29,7 @@ static constexpr uint32_t TFT_SPI_HZ = 30000000;
 static constexpr uint32_t TOUCH_SPI_HZ = 2000000;
 
 // Normal screen blanking. Touch IRQ remains alive and wakes the display.
-static constexpr uint32_t SCREEN_IDLE_MS = 60000;  // 60 s; set 0 to disable
+static constexpr uint32_t SCREEN_IDLE_MS = 300000;  // 5 min; set 0 to disable
 
 // ST7796 MADCTL. 0x28 = MV + BGR, common 480x320 landscape orientation.
 // If the image is mirrored on your exact panel, change this only; wiring stays the same.

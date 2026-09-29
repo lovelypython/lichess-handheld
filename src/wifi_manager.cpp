@@ -1,10 +1,55 @@
 #include "wifi_manager.h"
 
 void WiFiManagerLite::loadExtra() {
-  prefs_.begin("wifi-extra", true);
+  // Open read/write so a fresh board creates the namespace instead of logging
+  // an expected NVS NOT_FOUND error on first boot.
+  prefs_.begin("wifi-extra", false);
   extraSSID_ = prefs_.getString("ssid", "");
   extraPassword_ = prefs_.getString("pass", "");
   prefs_.end();
+}
+
+int WiFiManagerLite::scan() {
+  scanCount_ = 0;
+  int n = WiFi.scanNetworks(false, true);
+  if (n < 0) return 0;
+
+  // Keep the strongest instance of each SSID and cap the list so the UI stays
+  // small and deterministic.
+  for (int i = 0; i < n && scanCount_ < MAX_SCAN_RESULTS; ++i) {
+    String ssid = WiFi.SSID(i);
+    if (!ssid.length()) continue;
+    bool duplicate = false;
+    for (int j = 0; j < scanCount_; ++j) {
+      if (scanSSIDs_[j] == ssid) { duplicate = true; break; }
+    }
+    if (duplicate) continue;
+    scanSSIDs_[scanCount_] = ssid;
+    scanRSSIs_[scanCount_] = WiFi.RSSI(i);
+    scanSecure_[scanCount_] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+    ++scanCount_;
+  }
+  WiFi.scanDelete();
+  return scanCount_;
+}
+
+String WiFiManagerLite::scanSSID(int index) const {
+  return (index >= 0 && index < scanCount_) ? scanSSIDs_[index] : String();
+}
+
+int WiFiManagerLite::scanRSSI(int index) const {
+  return (index >= 0 && index < scanCount_) ? scanRSSIs_[index] : -127;
+}
+
+bool WiFiManagerLite::scanSecure(int index) const {
+  return index >= 0 && index < scanCount_ && scanSecure_[index];
+}
+
+bool WiFiManagerLite::connectAndSave(const String& ssid, const String& password,
+                                     uint32_t timeoutMs) {
+  if (!ssid.length()) return false;
+  if (!connectOne(ssid.c_str(), password.c_str(), timeoutMs)) return false;
+  return addOrReplaceExtra(ssid, password);
 }
 
 void WiFiManagerLite::begin() {

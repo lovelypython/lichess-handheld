@@ -49,7 +49,8 @@ TouchPoint XPT2046Touch::read() {
 }
 
 void XPT2046Touch::load() {
-  prefs_.begin("touch", true);
+  // Create the namespace on a new board instead of emitting NVS NOT_FOUND.
+  prefs_.begin("touch", false);
   calibrated_ = prefs_.getBool("ok", false);
   a_=prefs_.getFloat("a",0); b_=prefs_.getFloat("b",0); c_=prefs_.getFloat("c",0);
   d_=prefs_.getFloat("d",0); e_=prefs_.getFloat("e",0); f_=prefs_.getFloat("f",0);
