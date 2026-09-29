@@ -1,6 +1,7 @@
 #include "touch.h"
 
-static constexpr uint8_t TOUCH_CAL_VERSION = 4;
+// v5 invalidates coordinates calibrated against the old portrait MADCTL map.
+static constexpr uint8_t TOUCH_CAL_VERSION = 5;
 static constexpr uint16_t TOUCH_RAW_MIN = 200;
 static constexpr uint16_t TOUCH_RAW_MAX = 3900;
 static constexpr uint32_t CAL_TAP_TIMEOUT_MS = 12000;

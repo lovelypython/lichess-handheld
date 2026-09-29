@@ -35,9 +35,11 @@ static constexpr uint32_t TOUCH_SPI_HALF_PERIOD_US = 1;
 // Normal screen blanking. Touch IRQ remains alive and wakes the display.
 static constexpr uint32_t SCREEN_IDLE_MS = 300000;  // 5 min; set 0 to disable
 
-// ST7796 MADCTL from the RGB test that passed on this exact MSP4021 panel.
-// 0x48 is kept intentionally: do not replace it with the older 0x28 value.
-static constexpr uint8_t ST7796_MADCTL = 0x48;
+// ST7796S frame memory is natively 320 columns x 480 rows.  The UI is
+// 480x320 landscape, so MADCTL must set MV (row/column exchange).  0x48 is a
+// portrait mapping and must not be paired with 480x320 address windows.
+// 0x28 = MV | BGR: landscape with the connector/orientation used here.
+static constexpr uint8_t ST7796_MADCTL = 0x28;
 
 // Piece size on a 40x40 board square.
 static constexpr int PIECE_W = 36;
