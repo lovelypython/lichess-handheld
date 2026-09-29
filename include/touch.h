@@ -1,0 +1,36 @@
+#pragma once
+#include <Arduino.h>
+#include <SPI.h>
+#include <Preferences.h>
+#include "config.h"
+#include "display.h"
+
+struct TouchPoint {
+  bool pressed = false;
+  int16_t x = 0;
+  int16_t y = 0;
+  uint16_t rawX = 0;
+  uint16_t rawY = 0;
+};
+
+class XPT2046Touch {
+ public:
+  explicit XPT2046Touch(SPIClass& spi) : spi_(spi) {}
+  void begin();
+  bool readRaw(uint16_t& x, uint16_t& y);
+  TouchPoint read();
+  bool calibrated() const { return calibrated_; }
+  void runCalibration(ST7796Display& tft);
+  void clearCalibration();
+
+ private:
+  SPIClass& spi_;
+  Preferences prefs_;
+  bool calibrated_ = false;
+  float a_=0, b_=0, c_=0, d_=0, e_=0, f_=0;
+
+  uint16_t read12(uint8_t command);
+  void load();
+  void save();
+  bool solveAffine(const float raw[3][2], const float scr[3][2]);
+};
