@@ -237,15 +237,26 @@ static String fmtClock(int64_t base,bool white){
   else snprintf(b,sizeof(b),"%02d:%02d",sec/60,sec%60);return String(b);
 }
 
+static int renderedHomeConnection=-1;
+static String renderedHomeStatus,renderedHomeAccount;
+static void drawHomeDynamic(bool force=false){
+  int connection=loggedIn?2:(WiFi.status()==WL_CONNECTED?1:0);
+  String status=clip(statusText,73);
+  String account=clip(String("Account: ")+(accountName.length()?accountName:"offline"),73);
+  if(force||connection!=renderedHomeConnection){
+    Rect nr{348,14,114,32};tft.fillRect(nr.x,nr.y,nr.w,nr.h,C_PANEL);
+    uint16_t nc=connection==2?C_GOOD:(connection==1?C_HINT:C_BAD);tft.fillCircle(360,30,5,nc);
+    tft.drawText(370,22,connection==2?"Online":(connection==1?"Wi-Fi":"Offline"),C_TEXT,C_PANEL,1);
+    renderedHomeConnection=connection;
+  }
+  if(force||status!=renderedHomeStatus){tft.fillRect(18,276,444,18,C_BG);tft.drawText(18,280,status,C_MUTED,C_BG,1);renderedHomeStatus=status;}
+  if(force||account!=renderedHomeAccount){tft.fillRect(18,296,444,18,C_BG);tft.drawText(18,300,account,C_MUTED,C_BG,1);renderedHomeAccount=account;}
+}
 static void drawHome(){
   tft.fillScreen(C_BG);tft.drawText(18,16,"Chess Handheld",C_TEXT,C_BG,2);tft.drawText(18,48,"ESP32-C5 - Lichess",C_MUTED,C_BG,1);
-  Rect nr{348,14,114,32};tft.fillRect(nr.x,nr.y,nr.w,nr.h,C_PANEL);
-  uint16_t nc=loggedIn?C_GOOD:(WiFi.status()==WL_CONNECTED?C_HINT:C_BAD);tft.fillCircle(360,30,5,nc);
-  tft.drawText(370,22,loggedIn?"Online":(WiFi.status()==WL_CONNECTED?"Wi-Fi":"Offline"),C_TEXT,C_PANEL,1);
   const Rect cards[3]={{18,88,140,110},{170,88,140,110},{322,88,140,110}};const char* a[]={"Online","AI","Puzzle"};const char*b[]={"Random player","Level 1-8","Lichess API"};
   for(int i=0;i<3;i++){tft.fillRect(cards[i].x,cards[i].y,cards[i].w,cards[i].h,C_PANEL);tft.drawText(cards[i].x+12,cards[i].y+18,a[i],C_TEXT,C_PANEL,2);tft.drawText(cards[i].x+12,cards[i].y+49,b[i],C_MUTED,C_PANEL,1);}
-  button({322,216,140,34},"Network");tft.drawText(18,280,clip(statusText,73),C_MUTED,C_BG,1);
-  tft.drawText(18,300,clip(String("Account: ")+(accountName.length()?accountName:"offline"),73),C_MUTED,C_BG,1);
+  button({322,216,140,34},"Network");drawHomeDynamic(true);
 }
 
 static void drawSelector(Screen which){
@@ -272,7 +283,7 @@ static void drawOnlineConfirm(){
 }
 static void drawOnlineWait(){tft.fillScreen(C_BG);tft.drawText(18,28,"Finding opponent...",C_TEXT,C_BG,2);tft.drawText(18,74,String(ONLINE_TIMES[onlineTimeIndex][0])+"+"+ONLINE_TIMES[onlineTimeIndex][1]+(onlineRated?" - Rated":" - Casual"),C_TEXT,C_BG,2);tft.drawText(18,112,"Waiting for Lichess Board API",C_MUTED,C_BG,1);tft.drawText(18,150,clip(statusText,73),C_MUTED,C_BG,1);button({18,232,444,46},"Cancel search");}
 
-static String lastTopClock,lastBottomClock;
+static String lastTopClock,lastBottomClock,lastGameTopName,lastGameBottomName,lastGameTelemetry,lastGameStatus;
 static void drawGameClockRegion(bool top,bool force=false){
   bool colorWhite=top?!myWhite:myWhite;
   int64_t base=colorWhite?wtime:btime;
@@ -285,20 +296,31 @@ static void drawGameClockRegion(bool top,bool force=false){
   cached=value;
 }
 static void drawGameClocks(bool force=false){drawGameClockRegion(true,force);drawGameClockRegion(false,force);}
-static void drawGameTelemetry(){
+static void drawGameNames(bool force=false){
+  String top=myWhite?opponent:accountName,bot=myWhite?accountName:opponent;
+  top=clip(top,23);bot=clip(bot,23);
+  if(force||top!=lastGameTopName){tft.fillRect(326,44,150,16,C_PANEL);tft.drawText(330,48,top,C_MUTED,C_PANEL,1);lastGameTopName=top;}
+  if(force||bot!=lastGameBottomName){tft.fillRect(326,122,150,16,C_PANEL);tft.drawText(330,126,bot,C_MUTED,C_PANEL,1);lastGameBottomName=bot;}
+}
+static void drawGameTelemetry(bool force=false){
+  String value=String("API ")+(movePostMs?String(movePostMs)+"ms":"-")+"|Sync "+(moveStreamMs?String(moveStreamMs)+"ms":"-");
+  if(!force&&value==lastGameTelemetry)return;
   tft.fillRect(326,179,150,38,C_PANEL);
   tft.drawText(330,184,String("API ")+(movePostMs?String(movePostMs)+"ms":"-"),C_MUTED,C_PANEL,1);
   tft.drawText(330,199,String("Sync ")+(moveStreamMs?String(moveStreamMs)+"ms":"-"),C_MUTED,C_PANEL,1);
+  lastGameTelemetry=value;
 }
-static void drawGameStatus(){
-  tft.fillRect(326,302,150,18,C_PANEL);tft.drawText(330,308,clip(statusText,24),C_MUTED,C_PANEL,1);
+static void drawGameStatus(bool force=false){
+  String value=clip(statusText,24);if(!force&&value==lastGameStatus)return;
+  tft.fillRect(326,302,150,18,C_PANEL);tft.drawText(330,308,value,C_MUTED,C_PANEL,1);lastGameStatus=value;
 }
-static void drawGameSide(){
-  tft.fillRect(320,0,160,320,C_PANEL);String top=myWhite?opponent:accountName,bot=myWhite?accountName:opponent;
-  tft.drawText(330,10,"Online game",C_TEXT,C_PANEL,2);tft.drawText(330,48,clip(top,23),C_MUTED,C_PANEL,1);
-  tft.drawText(330,126,clip(bot,23),C_MUTED,C_PANEL,1);
-  lastTopClock="";lastBottomClock="";drawGameClocks(true);drawGameTelemetry();
-  button({330,226,140,32},"Home");button({330,264,140,32},"Resign");drawGameStatus();
+static void drawGameSide(bool force=false){
+  if(force){
+    tft.fillRect(320,0,160,320,C_PANEL);tft.drawText(330,10,"Online game",C_TEXT,C_PANEL,2);
+    button({330,226,140,32},"Home");button({330,264,140,32},"Resign");
+    lastTopClock="";lastBottomClock="";lastGameTopName="";lastGameBottomName="";lastGameTelemetry="";lastGameStatus="";
+  }
+  drawGameNames(force);drawGameClocks(force);drawGameTelemetry(force);drawGameStatus(force);
 }
 static void drawPuzzleSide(){
   tft.fillRect(320,0,160,320,C_PANEL);tft.drawText(330,10,"Puzzle",C_TEXT,C_PANEL,2);tft.drawText(330,45,clip(String("#")+puzzleId,23),C_MUTED,C_PANEL,1);tft.drawText(330,66,String("Rating ")+puzzleRating,C_TEXT,C_PANEL,2);tft.drawText(330,92,puzzleWhite?"White to move":"Black to move",C_TEXT,C_PANEL,1);
@@ -307,7 +329,7 @@ static void drawPuzzleSide(){
   else{button({330,210,66,28},puzzleHintLevel==0?"Hint":(puzzleHintLevel==1?"Hint 2":"Arrow"));button({404,210,66,28},"Answer");button({330,244,66,28},"< Prev",false,puzzlePlayedCount>0);button({404,244,66,28},"Next >",false,false);}
   button({330,278,66,28},"Home");button({404,278,66,28},"Next Puz",false,!puzzleLoading);tft.drawText(330,308,clip(statusText,24),C_MUTED,C_PANEL,1);
 }
-static void drawGame(){drawBoard();if(screen==Screen::GAME)drawGameSide();else drawPuzzleSide();}
+static void drawGame(bool forceSide=false){drawBoard();if(screen==Screen::GAME)drawGameSide(forceSide);else drawPuzzleSide();}
 
 static void drawPuzzleAnswer(){
   tft.fillScreen(C_BG);tft.drawText(18,14,"Puzzle answer",C_TEXT,C_BG,2);tft.drawText(18,47,clip(String("#")+puzzleId+" - rating "+puzzleRating,72),C_MUTED,C_BG,1);tft.drawText(18,78,"Full solution steps",C_TEXT,C_BG,2);
@@ -322,9 +344,14 @@ Wi-Fi credentials are configured locally and are not stored in this repository.
   int count=wifiMgr.scanCount(),start=networkPage*5;for(int row=0;row<5;row++){int i=start+row;Rect r{18,72+row*38,444,34};if(i<count){tft.fillRect(r.x,r.y,r.w,r.h,C_PANEL);signalBars(r.x+12,r.y+10,wifiMgr.scanRSSI(i),C_PANEL);tft.drawText(r.x+42,r.y+10,clip(wifiMgr.scanSSID(i)+(wifiMgr.scanSecure(i)?" [lock]":" [open]"),48),C_TEXT,C_PANEL,1);tft.drawText(r.x+390,r.y+10,String(wifiMgr.scanRSSI(i))+"dBm",C_MUTED,C_PANEL,1);}else if(row==0&&count==0)tft.drawText(30,r.y+10,"No networks found. Tap Refresh.",C_MUTED,C_BG,1);}
   button({18,274,112,34},"Refresh",true);button({142,274,72,34},"< Prev",false,networkPage>0);button({226,274,72,34},"Next >",false,(networkPage+1)*5<count);button({310,274,152,34},"Saved retry");
 }
+static void drawPasswordField(){
+  uint16_t f=wifiError?C_BAD:C_PANEL;tft.fillRect(14,51,452,31,f);String m;for(int i=0;i<min(54,int(wifiPassword.length()));i++)m+='*';tft.drawText(22,62,m,C_TEXT,f,1);
+}
+static void drawPasswordKeyboard(){
+  const char**rows=keyboardMode==0?KEY_LOWER:(keyboardMode==1?KEY_UPPER:KEY_SYMBOL);for(int r=0;r<4;r++)for(int c=0;c<10;c++){String s=rows[r][c]==' '?"SP":String(rows[r][c]);button({14+c*45,88+r*39,41,34},s);}button({101,249,82,57},keyboardMode==0?"ABC":(keyboardMode==1?"SYM":"abc"),keyboardMode!=0);
+}
 static void drawPassword(){
-  tft.fillScreen(C_BG);tft.drawText(14,9,"Wi-Fi password",C_TEXT,C_BG,2);tft.drawText(14,34,clip(selectedSSID,68),C_MUTED,C_BG,1);uint16_t f=wifiError?C_BAD:C_PANEL;tft.fillRect(14,51,452,31,f);String m;for(int i=0;i<min(54,int(wifiPassword.length()));i++)m+='*';tft.drawText(22,62,m,C_TEXT,f,1);
-  const char**rows=keyboardMode==0?KEY_LOWER:(keyboardMode==1?KEY_UPPER:KEY_SYMBOL);for(int r=0;r<4;r++)for(int c=0;c<10;c++){String s=rows[r][c]==' '?"SP":String(rows[r][c]);button({14+c*45,88+r*39,41,34},s);}button({14,249,82,57},"Cancel");button({101,249,82,57},keyboardMode==0?"ABC":(keyboardMode==1?"SYM":"abc"),keyboardMode!=0);button({188,249,82,57},"Delete");button({275,249,191,57},"Connect",true);
+  tft.fillScreen(C_BG);tft.drawText(14,9,"Wi-Fi password",C_TEXT,C_BG,2);tft.drawText(14,34,clip(selectedSSID,68),C_MUTED,C_BG,1);drawPasswordField();drawPasswordKeyboard();button({14,249,82,57},"Cancel");button({188,249,82,57},"Delete");button({275,249,191,57},"Connect",true);
 }
 
 static bool renderedScreenValid=false;
@@ -333,9 +360,14 @@ static void redraw(){
   if(screenAsleep)return;
   bool screenChanged=!renderedScreenValid||renderedScreen!=screen;
   if(screenChanged&&(screen==Screen::GAME||screen==Screen::PUZZLE_GAME))invalidateBoardAll();
+  if(!screenChanged){
+    if(screen==Screen::HOME){drawHomeDynamic();return;}
+    if(screen==Screen::GAME){drawBoard();drawGameSide();return;}
+    if(screen==Screen::PUZZLE_GAME){drawBoard();drawPuzzleSide();return;}
+  }
   switch(screen){
     case Screen::HOME:drawHome();break;case Screen::ONLINE:case Screen::AI:case Screen::PUZZLE:drawSelector(screen);break;
-    case Screen::ONLINE_CONFIRM:drawOnlineConfirm();break;case Screen::ONLINE_WAIT:drawOnlineWait();break;case Screen::GAME:case Screen::PUZZLE_GAME:drawGame();break;case Screen::PUZZLE_ANSWER:drawPuzzleAnswer();break;case Screen::NETWORKS:drawNetworks();break;case Screen::WIFI_PASSWORD:drawPassword();break;
+    case Screen::ONLINE_CONFIRM:drawOnlineConfirm();break;case Screen::ONLINE_WAIT:drawOnlineWait();break;case Screen::GAME:case Screen::PUZZLE_GAME:drawGame(true);break;case Screen::PUZZLE_ANSWER:drawPuzzleAnswer();break;case Screen::NETWORKS:drawNetworks();break;case Screen::WIFI_PASSWORD:drawPassword();break;
   }
   renderedScreen=screen;renderedScreenValid=true;
 }
@@ -398,7 +430,7 @@ static void processGameJson(const String&json){
   JsonDocument doc;if(deserializeJson(doc,json))return;String type=String((const char*)(doc["type"]|""));JsonObject state;
   if(type=="gameFull"){
     JsonObject w=doc["white"],b=doc["black"];String wid=String((const char*)(w["id"]|"")),bid=String((const char*)(b["id"]|""));wid.toLowerCase();bid.toLowerCase();String aid=accountId;aid.toLowerCase();
-    myWhite=aid.length()?aid==wid:w["aiLevel"].isNull();viewWhite=myWhite;JsonObject other=myWhite?b:w;const char* otherName=other["name"]|nullptr;if(!otherName||!*otherName)otherName=other["id"]|"Lichess AI";opponent=String(otherName);state=doc["state"];
+    myWhite=aid.length()?aid==wid:w["aiLevel"].isNull();if(viewWhite!=myWhite){viewWhite=myWhite;invalidateBoardAll();}JsonObject other=myWhite?b:w;const char* otherName=other["name"]|nullptr;if(!otherName||!*otherName)otherName=other["id"]|"Lichess AI";opponent=String(otherName);state=doc["state"];
   }else if(type=="gameState")state=doc.as<JsonObject>();else return;
   String moves=String((const char*)(state["moves"]|""));if(!applyServerMoves(moves)){statusText="Game move stream mismatch";return;}
   gameStatus=String((const char*)(state["status"]|"started"));wtime=state["wtime"]|-1;btime=state["btime"]|-1;winc=state["winc"]|0;binc=state["binc"]|0;clockSyncMs=millis();
@@ -460,7 +492,7 @@ static void networksClick(int x,int y){
   if(hit({310,274,152,34},x,y)){if(wifiMgr.autoConnect()){screen=Screen::HOME;ensureApi();redraw();}else refreshNetworks();return;}
   for(int r=0;r<5;r++){int i=networkPage*5+r;if(i<wifiMgr.scanCount()&&hit({18,72+r*38,444,34},x,y)){selectedNetwork=i;selectedSSID=wifiMgr.scanSSID(i);wifiPassword="";wifiError=false;if(wifiMgr.scanSecure(i)){screen=Screen::WIFI_PASSWORD;redraw();}else connectSelected();return;}}
 }
-static void passwordClick(int x,int y){const char**rows=keyboardMode==0?KEY_LOWER:(keyboardMode==1?KEY_UPPER:KEY_SYMBOL);for(int r=0;r<4;r++)for(int c=0;c<10;c++)if(hit({14+c*45,88+r*39,41,34},x,y)&&wifiPassword.length()<63){wifiPassword+=rows[r][c];wifiError=false;drawPassword();return;}if(hit({14,249,82,57},x,y)){screen=Screen::NETWORKS;redraw();}else if(hit({101,249,82,57},x,y)){keyboardMode=(keyboardMode+1)%3;drawPassword();}else if(hit({188,249,82,57},x,y)){if(wifiPassword.length())wifiPassword.remove(wifiPassword.length()-1);drawPassword();}else if(hit({275,249,191,57},x,y))connectSelected();}
+static void passwordClick(int x,int y){const char**rows=keyboardMode==0?KEY_LOWER:(keyboardMode==1?KEY_UPPER:KEY_SYMBOL);for(int r=0;r<4;r++)for(int c=0;c<10;c++)if(hit({14+c*45,88+r*39,41,34},x,y)&&wifiPassword.length()<63){wifiPassword+=rows[r][c];wifiError=false;drawPasswordField();return;}if(hit({14,249,82,57},x,y)){screen=Screen::NETWORKS;redraw();}else if(hit({101,249,82,57},x,y)){keyboardMode=(keyboardMode+1)%3;drawPasswordKeyboard();}else if(hit({188,249,82,57},x,y)){if(wifiPassword.length())wifiPassword.remove(wifiPassword.length()-1);drawPasswordField();}else if(hit({275,249,191,57},x,y))connectSelected();}
 
 static void handleTouch(int x,int y){lastActivityMs=millis();
   if(screen==Screen::HOME){homeClick(x,y);return;}if(screen==Screen::ONLINE||screen==Screen::AI||screen==Screen::PUZZLE){selectorClick(x,y);return;}if(screen==Screen::NETWORKS){networksClick(x,y);return;}if(screen==Screen::WIFI_PASSWORD){passwordClick(x,y);return;}
@@ -476,7 +508,7 @@ String serialLine;
 Wi-Fi credentials are configured locally and are not stored in this repository.
 
 void setup(){
-  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.9-landscape-fix");Serial.printf("[LCD] logical=%dx%d MADCTL=0x%02X\n",SCREEN_W,SCREEN_H,ST7796_MADCTL);pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,PIN_TFT_CS);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
+  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.10-touch-region");Serial.printf("[LCD] logical=%dx%d MADCTL=0x%02X\n",SCREEN_W,SCREEN_H,ST7796_MADCTL);pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,PIN_TFT_CS);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
 Wi-Fi credentials are configured locally and are not stored in this repository.
   if(connected){statusText=String("Connected to ")+WiFi.SSID();screen=Screen::HOME;ensureApi();redraw();}else{statusText="Choose a Wi-Fi network";refreshNetworks();}lastActivityMs=millis();
 }
@@ -484,10 +516,31 @@ Wi-Fi credentials are configured locally and are not stored in this repository.
 void loop(){
   processNetEvents();
   while(Serial.available()){char c=Serial.read();if(c=='\n'||c=='\r'){if(serialLine.length()){String cmd=serialLine;serialLine="";if(cmd!="screen sleep")wakeScreen();serialCommand(cmd);lastActivityMs=millis();}}else serialLine+=c;}
-  if(screenAsleep){if(digitalRead(PIN_TOUCH_IRQ)==LOW){wakeScreen();while(digitalRead(PIN_TOUCH_IRQ)==LOW)delay(5);lastTouchMs=millis();}delay(5);return;}
+  static bool touchDown=false;
+  static uint32_t lastTouchPollMs=0;
+  TouchPoint touchPoint;
+  bool touchSampled=false;
+  uint32_t now=millis();
+  if(now-lastTouchPollMs>=12){touchPoint=touch.read();touchSampled=true;lastTouchPollMs=now;}
+  if(screenAsleep){
+    if(touchSampled&&touchPoint.pressed&&!touchDown){touchDown=true;wakeScreen();lastTouchMs=now;}
+    else if(touchSampled&&!touchPoint.pressed)touchDown=false;
+    delay(3);return;
+  }
   if(puzzleReplyPending&&millis()>=puzzleReplyDue){String u=puzzleSolution[puzzleIndex];ChessMove m;ChessBoard before=board;if(board.applyUCI(u,&m)){lastMove=m;puzzlePlayed[puzzlePlayedCount++]=u;puzzleIndex++;startAnimation(before,m);statusText=puzzleIndex>=puzzleSolutionCount?"Solved!":"Your move";}else statusText="Puzzle reply mismatch";puzzleReplyPending=false;drawPuzzleSide();}
   updateAnimation();
-  if(millis()-lastTouchMs>120&&digitalRead(PIN_TOUCH_IRQ)==LOW){TouchPoint p=touch.read();if(p.pressed){Serial.printf("[Touch] raw=%u,%u screen=%d,%d page=%d\n",p.rawX,p.rawY,p.x,p.y,int(screen));handleTouch(p.x,p.y);while(digitalRead(PIN_TOUCH_IRQ)==LOW)delay(5);lastTouchMs=millis();}}
+  if(touchSampled){
+    if(touchPoint.pressed){
+      if(!touchDown&&now-lastTouchMs>80){
+        Serial.printf("[Touch] raw=%u,%u pressure=%u screen=%d,%d page=%d irq=%d\n",touchPoint.rawX,touchPoint.rawY,touchPoint.pressure,touchPoint.x,touchPoint.y,int(screen),digitalRead(PIN_TOUCH_IRQ));
+        handleTouch(touchPoint.x,touchPoint.y);lastTouchMs=now;
+      }
+      touchDown=true;
+    }else{
+      if(touchDown)lastTouchMs=now;
+      touchDown=false;
+    }
+  }
   if(SCREEN_IDLE_MS&&millis()-lastActivityMs>=SCREEN_IDLE_MS){sleepScreen();return;}
   static uint32_t lastClock=0;if(screen==Screen::GAME&&millis()-lastClock>=100){lastClock=millis();drawGameClocks();}
   delay(3);

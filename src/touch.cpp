@@ -1,16 +1,19 @@
 #include "touch.h"
 
-// v5 invalidates coordinates calibrated against the old portrait MADCTL map.
-static constexpr uint8_t TOUCH_CAL_VERSION = 5;
+// v6 switches press detection from IRQ-only to the XPT2046 pressure channels.
+// Old calibration data is intentionally discarded so the corrected sampler and
+// the true-landscape display map are calibrated together.
+static constexpr uint8_t TOUCH_CAL_VERSION = 6;
 static constexpr uint16_t TOUCH_RAW_MIN = 200;
 static constexpr uint16_t TOUCH_RAW_MAX = 3900;
+static constexpr uint16_t TOUCH_PRESSURE_MIN = 120;
 static constexpr uint32_t CAL_TAP_TIMEOUT_MS = 12000;
-static constexpr uint32_t CAL_SAMPLE_TIMEOUT_MS = 700;
+static constexpr uint32_t CAL_SAMPLE_TIMEOUT_MS = 900;
 static constexpr uint32_t CAL_RELEASE_TIMEOUT_MS = 1500;
 
-static uint16_t median5(uint16_t* v) {
-  for (int i=0;i<5;i++) for (int j=i+1;j<5;j++) if (v[j]<v[i]) { auto t=v[i];v[i]=v[j];v[j]=t; }
-  return v[2];
+static uint16_t medianSamples(uint16_t* v, int count) {
+  for (int i=0;i<count;i++) for (int j=i+1;j<count;j++) if (v[j]<v[i]) { auto t=v[i];v[i]=v[j];v[j]=t; }
+  return v[count/2];
 }
 
 void XPT2046Touch::begin() {
@@ -46,24 +49,31 @@ uint16_t XPT2046Touch::read12(uint8_t command) {
 }
 
 bool XPT2046Touch::readRaw(uint16_t& x, uint16_t& y) {
-  if (digitalRead(PIN_TOUCH_IRQ) != LOW) return false;
-
-  uint16_t xs[5], ys[5];
+  // Do not gate reads on T_IRQ. Some XPT2046 boards leave IRQ floating, pulse
+  // it too briefly, or hold it low after a noisy transfer. Z1/Z2 are the
+  // authoritative press test, while IRQ remains only a useful wake hint.
+  uint16_t xs[7], ys[7];
   digitalWrite(PIN_TFT_CS, HIGH);
   digitalWrite(PIN_TOUCH_CS, LOW);
-  for (int i=0;i<5;i++) {
+  uint16_t z1 = read12(0xB0);
+  for (int i=0;i<7;i++) {
     xs[i] = read12(0xD0);
     ys[i] = read12(0x90);
   }
+  uint16_t z2 = read12(0xC0);
   digitalWrite(PIN_TOUCH_CS, HIGH);
 
-  x=median5(xs); y=median5(ys);
+  uint16_t pressure = uint16_t(min<uint32_t>(4095, uint32_t(z1) + 4095U - uint32_t(z2)));
+  lastPressure_ = pressure;
+  if (z1 < 16 || pressure < TOUCH_PRESSURE_MIN) return false;
+
+  x=medianSamples(xs,7); y=medianSamples(ys,7);
   // A real press on this panel stays well away from the ADC rails. 0,0 means
   // IRQ is active but no position data is arriving from XPT2046 T_DO/MISO.
   if (x < 16 || y < 16 || x > 4079 || y > 4079) {
     static uint32_t lastWarningMs = 0;
     if (millis() - lastWarningMs >= 500) {
-      Serial.printf("[Touch] invalid raw=%u,%u (check T_DO/MISO, T_CS and power)\n", x, y);
+      Serial.printf("[Touch] invalid raw=%u,%u pressure=%u (check T_DO/MISO, T_CS and power)\n", x, y, pressure);
       lastWarningMs = millis();
     }
     return false;
@@ -75,7 +85,7 @@ TouchPoint XPT2046Touch::read() {
   TouchPoint p;
   uint16_t rx, ry;
   if (!readRaw(rx,ry)) return p;
-  p.pressed=true; p.rawX=rx; p.rawY=ry;
+  p.pressed=true; p.rawX=rx; p.rawY=ry; p.pressure=lastPressure_;
   if (calibrated_) {
     p.x = constrain(int(a_*rx + b_*ry + c_ + 0.5f), 0, SCREEN_W-1);
     p.y = constrain(int(d_*rx + e_*ry + f_ + 0.5f), 0, SCREEN_H-1);
@@ -183,21 +193,32 @@ void XPT2046Touch::runCalibration(ST7796Display& tft) {
   for(int i=0;i<5;i++){
     drawTarget(tft,int(scr[i][0]),int(scr[i][1]));
     uint32_t waitStarted=millis();
-    while(digitalRead(PIN_TOUCH_IRQ)!=LOW && millis()-waitStarted<CAL_TAP_TIMEOUT_MS) delay(5);
-    if(digitalRead(PIN_TOUCH_IRQ)!=LOW){captureFailed=true;break;}
-    uint16_t xs[11],ys[11];int n=0;
+    uint16_t firstX=0,firstY=0;
+    bool pressed=false;
+    while(millis()-waitStarted<CAL_TAP_TIMEOUT_MS){
+      if(readRaw(firstX,firstY)){pressed=true;break;}
+      delay(8);
+    }
+    if(!pressed){captureFailed=true;break;}
+    uint16_t xs[15],ys[15];int n=0;uint16_t capturedPressure=lastPressure_;
+    xs[n]=firstX;ys[n]=firstY;n++;
     uint32_t sampleStarted=millis();
-    while(digitalRead(PIN_TOUCH_IRQ)==LOW&&n<11&&millis()-sampleStarted<CAL_SAMPLE_TIMEOUT_MS){
+    while(n<15&&millis()-sampleStarted<CAL_SAMPLE_TIMEOUT_MS){
       uint16_t x,y;
-      if(readRaw(x,y)){xs[n]=x;ys[n]=y;n++;}
-      delay(5);
+      if(!readRaw(x,y))break;
+      xs[n]=x;ys[n]=y;n++;capturedPressure=lastPressure_;
+      delay(4);
     }
     uint32_t releaseStarted=millis();
-    while(digitalRead(PIN_TOUCH_IRQ)==LOW&&millis()-releaseStarted<CAL_RELEASE_TIMEOUT_MS)delay(3);
-    if(n==0||digitalRead(PIN_TOUCH_IRQ)==LOW){captureFailed=true;break;}
-    for(int a=0;a<n;a++)for(int b=a+1;b<n;b++)if(xs[b]<xs[a]){uint16_t t=xs[a];xs[a]=xs[b];xs[b]=t;}
-    for(int a=0;a<n;a++)for(int b=a+1;b<n;b++)if(ys[b]<ys[a]){uint16_t t=ys[a];ys[a]=ys[b];ys[b]=t;}
-    raw[i][0]=xs[n/2];raw[i][1]=ys[n/2];
+    int releasedSamples=0;
+    while(millis()-releaseStarted<CAL_RELEASE_TIMEOUT_MS&&releasedSamples<3){
+      uint16_t x,y;
+      if(readRaw(x,y))releasedSamples=0;else releasedSamples++;
+      delay(8);
+    }
+    if(n<3||releasedSamples<3){captureFailed=true;break;}
+    raw[i][0]=medianSamples(xs,n);raw[i][1]=medianSamples(ys,n);
+    Serial.printf("[Touch] calibration %d/5 raw=%d,%d pressure=%u\n",i+1,int(raw[i][0]),int(raw[i][1]),capturedPressure);
     delay(100);
   }
   calibrated_=!captureFailed&&solveAffine(raw,scr,5);

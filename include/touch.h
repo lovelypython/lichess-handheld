@@ -10,6 +10,7 @@ struct TouchPoint {
   int16_t y = 0;
   uint16_t rawX = 0;
   uint16_t rawY = 0;
+  uint16_t pressure = 0;
 };
 
 class XPT2046Touch {
@@ -28,6 +29,7 @@ class XPT2046Touch {
   Preferences prefs_;
   bool calibrated_ = false;
   bool usingDefaultCalibration_ = false;
+  uint16_t lastPressure_ = 0;
   float a_=0, b_=0, c_=0, d_=0, e_=0, f_=0;
 
   uint16_t read12(uint8_t command);
