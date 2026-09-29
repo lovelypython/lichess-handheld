@@ -1,9 +1,9 @@
 #include "touch.h"
 
-// v6 switches press detection from IRQ-only to the XPT2046 pressure channels.
+// v7 also fixes the built-in landscape fallback's horizontally mirrored X axis.
 // Old calibration data is intentionally discarded so the corrected sampler and
 // the true-landscape display map are calibrated together.
-static constexpr uint8_t TOUCH_CAL_VERSION = 6;
+static constexpr uint8_t TOUCH_CAL_VERSION = 7;
 static constexpr uint16_t TOUCH_RAW_MIN = 200;
 static constexpr uint16_t TOUCH_RAW_MAX = 3900;
 static constexpr uint16_t TOUCH_PRESSURE_MIN = 120;
@@ -121,19 +121,21 @@ void XPT2046Touch::clearCalibration() {
 }
 
 void XPT2046Touch::useDefaultCalibration(bool persist) {
-  // MSP4021/XPT2046 landscape fallback: touch Y drives screen X, while touch
-  // X drives the inverted screen Y axis. User calibration replaces this map.
+  // MSP4021/XPT2046 landscape fallback for this exact mounting:
+  // touch Y drives the INVERTED screen X axis, while touch X drives the
+  // inverted screen Y axis. The old positive X slope mirrored all left/right
+  // controls (Puzzle -> Online, Back -> Confirm).
   const float rawSpan = float(TOUCH_RAW_MAX - TOUCH_RAW_MIN);
   a_ = 0.0f;
-  b_ = float(SCREEN_W - 1) / rawSpan;
-  c_ = -b_ * TOUCH_RAW_MIN;
+  b_ = -float(SCREEN_W - 1) / rawSpan;
+  c_ = float(SCREEN_W - 1) - b_ * TOUCH_RAW_MIN;
   d_ = -float(SCREEN_H - 1) / rawSpan;
   e_ = 0.0f;
   f_ = float(SCREEN_H - 1) - d_ * TOUCH_RAW_MIN;
   calibrated_ = true;
   usingDefaultCalibration_ = true;
   if (persist) save();
-  Serial.println("[Touch] built-in default calibration enabled");
+  Serial.println("[Touch] built-in default calibration enabled (X/Y inverted landscape map)");
 }
 
 static float det3(const float m[3][3]) {
