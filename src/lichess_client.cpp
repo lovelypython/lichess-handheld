@@ -1,6 +1,5 @@
 #include "lichess_client.h"
 #include "secrets.h"
-#include "tls_root.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -53,7 +52,13 @@ class DecodedStream {
   }
 };
 
-static void prepareClient(WiFiClientSecure& c){c.setCACert(LICHESS_ROOT_CA);c.setTimeout(15);}
+static void prepareClient(WiFiClientSecure& c){
+  // Follow the certificate chain currently served by Lichess/Cloudflare
+  // instead of pinning one CA that can change when the CDN renews certificates.
+  c.useBuiltinCACertBundle();
+  c.setHandshakeTimeout(25);
+  c.setTimeout(15);
+}
 
 static int requestOnce(const char* method,const String& path,const String& body,String& response,const char* contentType="application/x-www-form-urlencoded"){
   if(WiFi.status()!=WL_CONNECTED)return -1000;
@@ -77,7 +82,7 @@ void LichessClient::emit(NetEventType type,const String& text,int code,uint32_t 
 }
 
 void LichessClient::begin(QueueHandle_t queue){
-  queue_=queue;stopEvent_=false;
+  queue_=queue;stopEvent_=false;authenticated_=false;
   if(!tlsHandshakeMutex)tlsHandshakeMutex=xSemaphoreCreateMutex();
   xTaskCreate(eventTask,"lichess-events",12288,this,1,nullptr);
 }
@@ -105,7 +110,14 @@ void LichessClient::jobTask(void* arg){
   Job* j=(Job*)arg;LichessClient* self=j->self;String body,resp,path;int code=0;uint32_t t0=millis();
   switch(j->op){
     case Op::LOGIN:
-      code=requestOnce("GET","/api/account","",resp);
+      self->authenticated_=false;
+      for(int attempt=0;attempt<3;attempt++){
+        resp="";code=requestOnce("GET","/api/account","",resp);
+        Serial.printf("[Lichess] account attempt %d HTTP %d, response bytes=%u\n",attempt+1,code,unsigned(resp.length()));
+        if(code==200||code==401||code==403)break;
+        delay(1000*(attempt+1));
+      }
+      self->authenticated_=(code==200);
       self->emit(code==200?NetEventType::ACCOUNT:NetEventType::ERROR,resp,code,millis()-t0);break;
     case Op::AI:{
       int seconds=j->y%10000,inc=j->y/10000;
@@ -149,7 +161,7 @@ static bool startStream(const String& path,const String& method,const String& bo
 void LichessClient::eventTask(void* arg){
   auto* self=(LichessClient*)arg;
   while(!self->stopEvent_){
-    if(self->pauseEvent_){delay(100);continue;}
+    if(self->pauseEvent_||!self->authenticated_){delay(100);continue;}
     if(WiFi.status()!=WL_CONNECTED){delay(1000);continue;}
     WiFiClientSecure client;HTTPClient http;int code;bool chunked;
     if(!startStream("/api/stream/event","GET","",client,http,code,chunked)){self->emit(NetEventType::ERROR,String("Event stream HTTP ")+code,code);http.end();delay(2000);continue;}

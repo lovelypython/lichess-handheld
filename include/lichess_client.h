@@ -32,6 +32,7 @@ class LichessClient {
  private:
   QueueHandle_t queue_=nullptr;
   volatile bool stopEvent_=false;
+  volatile bool authenticated_=false;
   volatile bool pauseEvent_=false;
   volatile bool stopGame_=false;
   volatile bool stopSeek_=false;

@@ -317,14 +317,14 @@ static void processGameJson(const String&json){
 static void processNetEvents(){
   if(!netQueue)return;NetEvent*e=nullptr;while(xQueueReceive(netQueue,&e,0)==pdTRUE){if(!e)continue;
     switch(e->type){
-      case NetEventType::ACCOUNT:{JsonDocument d;if(!deserializeJson(d,e->text)){accountId=String((const char*)(d["id"]|""));accountName=String((const char*)(d["username"]|accountId.c_str()));loggedIn=true;statusText=String("Logged in: ")+accountName;}break;}
+      case NetEventType::ACCOUNT:{JsonDocument d;DeserializationError err=deserializeJson(d,e->text);if(!err){accountId=String((const char*)(d["id"]|""));accountName=String((const char*)(d["username"]|accountId.c_str()));loggedIn=accountId.length()||accountName.length();statusText=loggedIn?String("Logged in: ")+accountName:"Account response missing name";Serial.printf("[Lichess] account login %s\n",loggedIn?"OK":"missing fields");}else{loggedIn=false;statusText=String("Account JSON error: ")+err.c_str();Serial.printf("[Lichess] account JSON error: %s, bytes=%u\n",err.c_str(),unsigned(e->text.length()));}break;}
       case NetEventType::EVENT_JSON:{JsonDocument d;if(!deserializeJson(d,e->text)&&String((const char*)(d["type"]|""))=="gameStart")startGame(String((const char*)(d["game"]["id"]|"")));break;}
       case NetEventType::START_GAME:{JsonDocument d;if(!deserializeJson(d,e->text))startGame(String((const char*)(d["id"]|"")));else statusText="AI response parse failed";break;}
       case NetEventType::GAME_JSON:processGameJson(e->text);break;
       case NetEventType::MOVE_RESULT:{movePostMs=e->elapsedMs;int nl=e->text.indexOf('\n');String u=nl>=0?e->text.substring(0,nl):e->text;if(e->code<200||e->code>=300){board=pendingBoard;lastMove=pendingLast;wtime=pendingWtime;btime=pendingBtime;clockSyncMs=pendingClockSync;pendingUci="";statusText=String("Move rejected HTTP ")+e->code;redraw();}else statusText=String("Move sent - ")+movePostMs+"ms";break;}
       case NetEventType::PUZZLE_JSON:loadPuzzle(e->text);redraw();break;
       case NetEventType::STATUS:statusText=e->text;redraw();break;
-      case NetEventType::ERROR:statusText=String("Network/API error ")+e->code+": "+clip(e->text,52);if(e->code==401||e->code==403)loggedIn=false;redraw();break;
+      case NetEventType::ERROR:statusText=String("Network/API error ")+e->code+": "+clip(e->text,52);Serial.printf("[Lichess] error code=%d text=%s\n",e->code,e->text.c_str());if(e->code==401||e->code==403)loggedIn=false;redraw();break;
     }delete e;e=nullptr;
   }
 }
@@ -385,7 +385,7 @@ String serialLine;
 Wi-Fi credentials are configured locally and are not stored in this repository.
 
 void setup(){
-  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.5");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
+  Serial.begin(115200);delay(500);Serial.println("\nESP32-C5 Lichess Handheld full firmware v1.0.6");pinMode(PIN_TFT_CS,OUTPUT);digitalWrite(PIN_TFT_CS,HIGH);pinMode(PIN_TFT_BL,OUTPUT);digitalWrite(PIN_TFT_BL,HIGH);pinMode(PIN_TOUCH_CS,OUTPUT);digitalWrite(PIN_TOUCH_CS,HIGH);displaySPI.begin(PIN_SPI_SCK,PIN_SPI_MISO,PIN_SPI_MOSI,-1);tft.begin();touch.begin();if(!touch.calibrated())touch.runCalibration(tft);
 Wi-Fi credentials are configured locally and are not stored in this repository.
   if(connected){statusText=String("Connected to ")+WiFi.SSID();screen=Screen::HOME;ensureApi();redraw();}else{statusText="Choose a Wi-Fi network";refreshNetworks();}lastActivityMs=millis();
 }
