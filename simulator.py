@@ -1,452 +1,559 @@
 #!/usr/bin/env python3
-import os
-import sys
-import json
-import queue
-import threading
-import time
-
+import os, sys, json, queue, threading, io, base64
 import requests
 import pygame
 import chess
+import chess.pgn
 
 BASE = "https://lichess.org"
 TOKEN = os.environ.get("LICHESS_TOKEN", "").strip()
 
 W, H = 480, 320
-BOARD_PX = 320
+BOARD = 320
 SQ = 40
-SIDEBAR_X = 320
+SIDE_X = 320
 
-HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/json",
-    "User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.1",
+BG = (25, 27, 31)
+PANEL = (37, 39, 44)
+BTN = (65, 69, 78)
+BTN_ON = (104, 135, 78)
+TEXT = (245, 245, 245)
+MUTED = (184, 184, 184)
+LIGHT = (238, 238, 210)
+DARK = (118, 150, 86)
+LAST = (205, 210, 106)
+SEL = (246, 246, 105)
+
+# Cburnett chess pieces, embedded directly in this file.
+# Source: ndg6/staunton copy of Cburnett pieces; artwork is multi-licensed.
+# We use the BSD-3-Clause option for the artwork. See NOTICE.txt in this package.
+PIECE_B64 = {
+"wp": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PHBhdGggZD0iTTIyLjUgOWMtMi4yMSAwLTQgMS43OS00IDQgMCAuODkuMjkgMS43MS43OCAyLjM4QzE3LjMzIDE2LjUgMTYgMTguNTkgMTYgMjFjMCAyLjAzLjk0IDMuODQgMi40MSA1LjAzLTMgMS4wNi03LjQxIDUuNTUtNy40MSAxMy40N2gyM2MwLTcuOTItNC40MS0xMi40MS03LjQxLTEzLjQ3IDEuNDctMS4xOSAyLjQxLTMgMi40MS01LjAzIDAtMi40MS0xLjMzLTQuNS0zLjI4LTUuNjIuNDktLjY3Ljc4LTEuNDkuNzgtMi4zOCAwLTIuMjEtMS43OS00LTQtNHoiIGZpbGw9IiNmZmYiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==""",
+"wn": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0yMiAxMGMxMC41IDEgMTYuNSA4IDE2IDI5SDE1YzAtOSAxMC02LjUgOC0yMSIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik0yNCAxOGMuMzggMi45MS01LjU1IDcuMzctOCA5LTMgMi0yLjgyIDQuMzQtNSA0LTEuMDQyLS45NCAxLjQxLTMuMDQgMC0zLTEgMCAuMTkgMS4yMy0xIDItMSAwLTQuMDAzIDEtNC00IDAtMiA2LTEyIDYtMTJzMS44OS0xLjkgMi0zLjVjLS43My0uOTk0LS41LTItLjUtMyAxLTEgMyAyLjUgMyAyLjVoMnMuNzgtMS45OTIgMi41LTNjMSAwIDEgMyAxIDMiIGZpbGw9IiNmZmYiLz48cGF0aCBkPSJNOS41IDI1LjVhLjUuNSAwIDEgMS0xIDAgLjUuNSAwIDEgMSAxIDB6bTUuNDMzLTkuNzVhLjUgMS41IDMwIDEgMS0uODY2LS41LjUgMS41IDMwIDEgMSAuODY2LjV6IiBmaWxsPSIjMDAwIi8+PC9nPjwvc3ZnPg==""",
+"wb": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxnIGZpbGw9IiNmZmYiIHN0cm9rZS1saW5lY2FwPSJidXR0Ij48cGF0aCBkPSJNOSAzNmMzLjM5LS45NyAxMC4xMS40MyAxMy41LTIgMy4zOSAyLjQzIDEwLjExIDEuMDMgMTMuNSAyIDAgMCAxLjY1LjU0IDMgMi0uNjguOTctMS42NS45OS0zIC41LTMuMzktLjk3LTEwLjExLjQ2LTEzLjUtMS0zLjM5IDEuNDYtMTAuMTEuMDMtMTMuNSAxLTEuMzU0LjQ5LTIuMzIzLjQ3LTMtLjUgMS4zNTQtMS45NCAzLTIgMy0yeiIvPjxwYXRoIGQ9Ik0xNSAzMmMyLjUgMi41IDEyLjUgMi41IDE1IDAgLjUtMS41IDAtMiAwLTIgMC0yLjUtMi41LTQtMi41LTQgNS41LTEuNSA2LTExLjUtNS0xNS41LTExIDQtMTAuNSAxNC01IDE1LjUgMCAwLTIuNSAxLjUtMi41IDQgMCAwLS41LjUgMCAyeiIvPjxwYXRoIGQ9Ik0yNSA4YTIuNSAyLjUgMCAxIDEtNSAwIDIuNSAyLjUgMCAxIDEgNSAweiIvPjwvZz48cGF0aCBkPSJNMTcuNSAyNmgxME0xNSAzMGgxNW0tNy41LTE0LjV2NU0yMCAxOGg1IiBzdHJva2UtbGluZWpvaW49Im1pdGVyIi8+PC9nPjwvc3ZnPg==""",
+"wr": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbD0iI2ZmZiIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik05IDM5aDI3di0zSDl2M3ptMy0zdi00aDIxdjRIMTJ6bS0xLTIyVjloNHYyaDVWOWg1djJoNVY5aDR2NSIgc3Ryb2tlLWxpbmVjYXA9ImJ1dHQiLz48cGF0aCBkPSJNMzQgMTRsLTMgM0gxNGwtMy0zIi8+PHBhdGggZD0iTTMxIDE3djEyLjVIMTRWMTciIHN0cm9rZS1saW5lY2FwPSJidXR0IiBzdHJva2UtbGluZWpvaW49Im1pdGVyIi8+PHBhdGggZD0iTTMxIDI5LjVsMS41IDIuNWgtMjBsMS41LTIuNSIvPjxwYXRoIGQ9Ik0xMSAxNGgyMyIgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVqb2luPSJtaXRlciIvPjwvZz48L3N2Zz4=""",
+"wq": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbD0iI2ZmZiIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik04IDEyYTIgMiAwIDEgMS00IDAgMiAyIDAgMSAxIDQgMHptMTYuNS00LjVhMiAyIDAgMSAxLTQgMCAyIDIgMCAxIDEgNCAwek00MSAxMmEyIDIgMCAxIDEtNCAwIDIgMiAwIDEgMSA0IDB6TTE2IDguNWEyIDIgMCAxIDEtNCAwIDIgMiAwIDEgMSA0IDB6TTMzIDlhMiAyIDAgMSAxLTQgMCAyIDIgMCAxIDEgNCAweiIvPjxwYXRoIGQ9Ik05IDI2YzguNS0xLjUgMjEtMS41IDI3IDBsMi0xMi03IDExVjExbC01LjUgMTMuNS0zLTE1LTMgMTUtNS41LTE0VjI1TDcgMTRsMiAxMnoiIHN0cm9rZS1saW5lY2FwPSJidXR0Ii8+PHBhdGggZD0iTTkgMjZjMCAyIDEuNSAyIDIuNSA0IDEgMS41IDEgMSAuNSAzLjUtMS41IDEtMS41IDIuNS0xLjUgMi41LTEuNSAxLjUuNSAyLjUuNSAyLjUgNi41IDEgMTYuNSAxIDIzIDAgMCAwIDEuNS0xIDAtMi41IDAgMCAuNS0xLjUtMS0yLjUtLjUtMi41LS41LTIgLjUtMy41IDEtMiAyLjUtMiAyLjUtNC04LjUtMS41LTE4LjUtMS41LTI3IDB6IiBzdHJva2UtbGluZWNhcD0iYnV0dCIvPjxwYXRoIGQ9Ik0xMS41IDMwYzMuNS0xIDE4LjUtMSAyMiAwTTEyIDMzLjVjNi0xIDE1LTEgMjEgMCIgZmlsbD0ibm9uZSIvPjwvZz48L3N2Zz4=""",
+"wk": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0yMi41IDExLjYzVjZNMjAgOGg1IiBzdHJva2UtbGluZWpvaW49Im1pdGVyIi8+PHBhdGggZD0iTTIyLjUgMjVzNC41LTcuNSAzLTEwLjVjMCAwLTEtMi41LTMtMi41cy0zIDIuNS0zIDIuNWMtMS41IDMgMyAxMC41IDMgMTAuNSIgZmlsbD0iI2ZmZiIgc3Ryb2tlLWxpbmVjYXA9ImJ1dHQiIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiLz48cGF0aCBkPSJNMTEuNSAzN2M1LjUgMy41IDE1LjUgMy41IDIxIDB2LTdzOS00LjUgNi0xMC41Yy00LTYuNS0xMy41LTMuNS0xNiA0VjI3di0zLjVjLTMuNS03LjUtMTMtMTAuNS0xNi00LTMgNiA1IDEwIDUgMTBWMzd6IiBmaWxsPSIjZmZmIi8+PHBhdGggZD0iTTExLjUgMzBjNS41LTMgMTUuNS0zIDIxIDBtLTIxIDMuNWM1LjUtMyAxNS41LTMgMjEgMG0tMjEgMy41YzUuNS0zIDE1LjUtMyAyMiAwIi8+PC9nPjwvc3ZnPg==""",
+"bp": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PHBhdGggZD0iTTIyLjUgOWMtMi4yMSAwLTQgMS43OS00IDQgMCAuODkuMjkgMS43MS43OCAyLjM4QzE3LjMzIDE2LjUgMTYgMTguNTkgMTYgMjFjMCAyLjAzLjk0IDMuODQgMi40MSA1LjAzLTMgMS4wNi03LjQxIDUuNTUtNy40MSAxMy40N2gyM2MwLTcuOTItNC40MS0xMi40MS03LjQxLTEzLjQ3IDEuNDctMS4xOSAyLjQxLTMgMi40MS01LjAzIDAtMi40MS0xLjMzLTQuNS0zLjI4LTUuNjIuNDktLjY3Ljc4LTEuNDkuNzgtMi4zOCAwLTIuMjEtMS43OS00LTQtNHoiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==""",
+"bn": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0yMiAxMGMxMC41IDEgMTYuNSA4IDE2IDI5SDE1YzAtOSAxMC02LjUgOC0yMSIgZmlsbD0iIzAwMCIvPjxwYXRoIGQ9Ik0yNCAxOGMuMzggMi45MS01LjU1IDcuMzctOCA5LTMgMi0yLjgyIDQuMzQtNSA0LTEuMDQyLS45NCAxLjQxLTMuMDQgMC0zLTEgMCAuMTkgMS4yMy0xIDItMSAwLTQuMDAzIDEtNC00IDAtMiA2LTEyIDYtMTJzMS44OS0xLjkgMi0zLjVjLS43My0uOTk0LS41LTItLjUtMyAxLTEgMyAyLjUgMyAyLjVoMnMuNzgtMS45OTIgMi41LTNjMSAwIDEgMyAxIDMiIGZpbGw9IiMwMDAiLz48cGF0aCBkPSJNOS41IDI1LjVhLjUuNSAwIDEgMS0xIDAgLjUuNSAwIDEgMSAxIDB6bTUuNDMzLTkuNzVhLjUgMS41IDMwIDEgMS0uODY2LS41LjUgMS41IDMwIDEgMSAuODY2LjV6IiBmaWxsPSIjZWNlY2VjIiBzdHJva2U9IiNlY2VjZWMiLz48cGF0aCBkPSJNMjQuNTUgMTAuNGwtLjQ1IDEuNDUuNS4xNWMzLjE1IDEgNS42NSAyLjQ5IDcuOSA2Ljc1UzM1Ljc1IDI5LjA2IDM1LjI1IDM5bC0uMDUuNWgyLjI1bC4wNS0uNWMuNS0xMC4wNi0uODgtMTYuODUtMy4yNS0yMS4zNC0yLjM3LTQuNDktNS43OS02LjY0LTkuMTktNy4xNmwtLjUxLS4xeiIgZmlsbD0iI2VjZWNlYyIgc3Ryb2tlPSJub25lIi8+PC9nPjwvc3ZnPg==""",
+"bb": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxnIGZpbGw9IiMwMDAiIHN0cm9rZS1saW5lY2FwPSJidXR0Ij48cGF0aCBkPSJNOSAzNmMzLjM5LS45NyAxMC4xMS40MyAxMy41LTIgMy4zOSAyLjQzIDEwLjExIDEuMDMgMTMuNSAyIDAgMCAxLjY1LjU0IDMgMi0uNjguOTctMS42NS45OS0zIC41LTMuMzktLjk3LTEwLjExLjQ2LTEzLjUtMS0zLjM5IDEuNDYtMTAuMTEuMDMtMTMuNSAxLTEuMzU0LjQ5LTIuMzIzLjQ3LTMtLjUgMS4zNTQtMS45NCAzLTIgMy0yeiIvPjxwYXRoIGQ9Ik0xNSAzMmMyLjUgMi41IDEyLjUgMi41IDE1IDAgLjUtMS41IDAtMiAwLTIgMC0yLjUtMi41LTQtMi41LTQgNS41LTEuNSA2LTExLjUtNS0xNS41LTExIDQtMTAuNSAxNC01IDE1LjUgMCAwLTIuNSAxLjUtMi41IDQgMCAwLS41LjUgMCAyeiIvPjxwYXRoIGQ9Ik0yNSA4YTIuNSAyLjUgMCAxIDEtNSAwIDIuNSAyLjUgMCAxIDEgNSAweiIvPjwvZz48cGF0aCBkPSJNMTcuNSAyNmgxME0xNSAzMGgxNW0tNy41LTE0LjV2NU0yMCAxOGg1IiBzdHJva2U9IiNlY2VjZWMiIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiLz48L2c+PC9zdmc+""",
+"br": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik05IDM5aDI3di0zSDl2M3ptMy41LTdsMS41LTIuNWgxN2wxLjUgMi41aC0yMHptLS41IDR2LTRoMjF2NEgxMnoiIHN0cm9rZS1saW5lY2FwPSJidXR0Ii8+PHBhdGggZD0iTTE0IDI5LjV2LTEzaDE3djEzSDE0eiIgc3Ryb2tlLWxpbmVjYXA9ImJ1dHQiIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiLz48cGF0aCBkPSJNMTQgMTYuNUwxMSAxNGgyM2wtMyAyLjVIMTR6TTExIDE0VjloNHYyaDVWOWg1djJoNVY5aDR2NUgxMXoiIHN0cm9rZS1saW5lY2FwPSJidXR0Ii8+PHBhdGggZD0iTTEyIDM1LjVoMjFtLTIwLTRoMTltLTE4LTJoMTdtLTE3LTEzaDE3TTExIDE0aDIzIiBmaWxsPSJub25lIiBzdHJva2U9IiNlY2VjZWMiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWxpbmVqb2luPSJtaXRlciIvPjwvZz48L3N2Zz4=""",
+"bq": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxnIHN0cm9rZT0ibm9uZSI+PGNpcmNsZSBjeD0iNiIgY3k9IjEyIiByPSIyLjc1Ii8+PGNpcmNsZSBjeD0iMTQiIGN5PSI5IiByPSIyLjc1Ii8+PGNpcmNsZSBjeD0iMjIuNSIgY3k9IjgiIHI9IjIuNzUiLz48Y2lyY2xlIGN4PSIzMSIgY3k9IjkiIHI9IjIuNzUiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjEyIiByPSIyLjc1Ii8+PC9nPjxwYXRoIGQ9Ik05IDI2YzguNS0xLjUgMjEtMS41IDI3IDBsMi41LTEyLjVMMzEgMjVsLS4zLTE0LjEtNS4yIDEzLjYtMy0xNC41LTMgMTQuNS01LjItMTMuNkwxNCAyNSA2LjUgMTMuNSA5IDI2eiIgc3Ryb2tlLWxpbmVjYXA9ImJ1dHQiLz48cGF0aCBkPSJNOSAyNmMwIDIgMS41IDIgMi41IDQgMSAxLjUgMSAxIC41IDMuNS0xLjUgMS0xLjUgMi41LTEuNSAyLjUtMS41IDEuNS41IDIuNS41IDIuNSA2LjUgMSAxNi41IDEgMjMgMCAwIDAgMS41LTEgMC0yLjUgMCAwIC41LTEuNS0xLTIuNS0uNS0yLjUtLjUtMiAuNS0zLjUgMS0yIDIuNS0yIDIuNS00LTguNS0xLjUtMTguNS0xLjUtMjcgMHoiIHN0cm9rZS1saW5lY2FwPSJidXR0Ii8+PHBhdGggZD0iTTExIDM4LjVhMzUgMzUgMSAwIDAgMjMgMCIgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVjYXA9ImJ1dHQiLz48cGF0aCBkPSJNMTEgMjlhMzUgMzUgMSAwIDEgMjMgMG0tMjEuNSAyLjVoMjBtLTIxIDNhMzUgMzUgMSAwIDAgMjIgMG0tMjMgM2EzNSAzNSAxIDAgMCAyNCAwIiBmaWxsPSJub25lIiBzdHJva2U9IiNlY2VjZWMiLz48L2c+PC9zdmc+""",
+"bk": """PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NSIgaGVpZ2h0PSI0NSI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2U9IiMwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0yMi41IDExLjYzVjYiIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiLz48cGF0aCBkPSJNMjIuNSAyNXM0LjUtNy41IDMtMTAuNWMwIDAtMS0yLjUtMy0yLjVzLTMgMi41LTMgMi41Yy0xLjUgMyAzIDEwLjUgMyAxMC41IiBmaWxsPSIjMDAwIiBzdHJva2UtbGluZWNhcD0iYnV0dCIgc3Ryb2tlLWxpbmVqb2luPSJtaXRlciIvPjxwYXRoIGQ9Ik0xMS41IDM3YzUuNSAzLjUgMTUuNSAzLjUgMjEgMHYtN3M5LTQuNSA2LTEwLjVjLTQtNi41LTEzLjUtMy41LTE2IDRWMjd2LTMuNWMtMy41LTcuNS0xMy0xMC41LTE2LTQtMyA2IDUgMTAgNSAxMFYzN3oiIGZpbGw9IiMwMDAiLz48cGF0aCBkPSJNMjAgOGg1IiBzdHJva2UtbGluZWpvaW49Im1pdGVyIi8+PHBhdGggZD0iTTMyIDI5LjVzOC41LTQgNi4wMy05LjY1QzM0LjE1IDE0IDI1IDE4IDIyLjUgMjQuNWwuMDEgMi4xLS4wMS0yLjFDMjAgMTggOS45MDYgMTQgNi45OTcgMTkuODVjLTIuNDk3IDUuNjUgNC44NTMgOSA0Ljg1MyA5IiBzdHJva2U9IiNlY2VjZWMiLz48cGF0aCBkPSJNMTEuNSAzMGM1LjUtMyAxNS41LTMgMjEgMG0tMjEgMy41YzUuNS0zIDE1LjUtMyAyMiAwbS0yMSAzLjVjNS41LTMgMTUuNS0zIDIxIDAiIHN0cm9rZT0iI2VjZWNlYyIvPjwvZz48L3N2Zz4=""",
 }
 
-event_q = queue.Queue()
+def load_piece_surfaces():
+    result = {}
+    for key, data in PIECE_B64.items():
+        raw = base64.b64decode(data)
+        try:
+            surf = pygame.image.load(io.BytesIO(raw), f"{key}.svg").convert_alpha()
+            surf = pygame.transform.smoothscale(surf, (36, 36))
+        except Exception:
+            # Fallback if the local SDL_image build has no SVG decoder.
+            surf = pygame.Surface((36, 36), pygame.SRCALPHA)
+            pygame.draw.circle(surf, (245,245,245) if key[0]=="w" else (35,35,35), (18,18), 15)
+            pygame.draw.circle(surf, (30,30,30), (18,18), 15, 2)
+        result[key] = surf
+    return result
 
+def headers():
+    h = {"User-Agent": "ESP32-C5-Handheld-Chess-Prototype/0.4"}
+    if TOKEN:
+        h["Authorization"] = f"Bearer {TOKEN}"
+    return h
 
-class LichessClient:
+EVQ = queue.Queue()
+
+class Lichess:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
+        self.s = requests.Session()
+        self.s.headers.update(headers())
         self.account = None
-        self.game_id = None
-        self.stream_stop = threading.Event()
+        self.event_stop = threading.Event()
+        self.game_stop = threading.Event()
+        self.seek_stop = threading.Event()
 
-    def check_account(self):
-        r = self.session.get(f"{BASE}/api/account", timeout=15)
+    def get_account(self):
+        if not TOKEN:
+            return None
+        r = self.s.get(BASE + "/api/account", timeout=15)
         r.raise_for_status()
         self.account = r.json()
         return self.account
 
-    def create_ai_game(self, level=1, minutes=5, increment=3):
+    def start_event_stream(self):
+        if not TOKEN:
+            return
+        self.event_stop.clear()
+        def work():
+            try:
+                with self.s.get(BASE + "/api/stream/event", stream=True,
+                                timeout=(15, None),
+                                headers={**headers(), "Accept":"application/x-ndjson"}) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines(decode_unicode=True):
+                        if self.event_stop.is_set(): break
+                        if not line: continue
+                        try:
+                            EVQ.put(("event", json.loads(line)))
+                        except Exception:
+                            pass
+            except Exception as e:
+                EVQ.put(("status", f"Event stream: {e}"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def create_ai(self, level, minutes, inc):
         data = {
             "level": level,
-            "clock.limit": minutes * 60,
-            "clock.increment": increment,
+            "clock.limit": int(minutes * 60),
+            "clock.increment": inc,
             "color": "random",
             "variant": "standard",
         }
-        r = self.session.post(f"{BASE}/api/challenge/ai", data=data, timeout=15)
+        r = self.s.post(BASE + "/api/challenge/ai", data=data, timeout=15)
         r.raise_for_status()
-        payload = r.json()
-        game_id = payload.get("id")
-        if not game_id:
-            raise RuntimeError(f"No game id in response: {payload}")
-        self.game_id = game_id
-        return payload
+        return r.json()
 
-    def post_move(self, uci):
-        if not self.game_id:
-            return False, "No active game"
-        try:
-            r = self.session.post(
-                f"{BASE}/api/board/game/{self.game_id}/move/{uci}",
-                timeout=15,
-            )
-            if r.status_code == 200:
-                return True, "Move sent"
-            return False, f"HTTP {r.status_code}: {r.text[:120]}"
-        except Exception as e:
-            return False, str(e)
-
-    def resign(self):
-        if not self.game_id:
-            return False, "No active game"
-        try:
-            r = self.session.post(
-                f"{BASE}/api/board/game/{self.game_id}/resign",
-                timeout=15,
-            )
-            return r.status_code == 200, f"HTTP {r.status_code}"
-        except Exception as e:
-            return False, str(e)
-
-    def stop_stream(self):
-        self.stream_stop.set()
-
-    def start_game_stream(self, game_id):
-        self.stream_stop.clear()
-
-        def worker():
-            url = f"{BASE}/api/board/game/stream/{game_id}"
+    def seek(self, minutes, inc, rated=False):
+        # Board API random seeks: Rapid/Classical/Correspondence only.
+        self.seek_stop.clear()
+        def work():
+            data = {
+                "time": minutes,
+                "increment": inc,
+                "rated": "true" if rated else "false",
+                "variant": "standard",
+            }
+            EVQ.put(("status", f"Seeking {minutes}+{inc}..."))
             try:
-                with self.session.get(
-                    url,
-                    stream=True,
-                    timeout=(15, None),
-                    headers={**HEADERS, "Accept": "application/x-ndjson"},
-                ) as r:
+                with self.s.post(BASE + "/api/board/seek", data=data, stream=True,
+                                 timeout=(15, None),
+                                 headers={**headers(), "Accept":"application/x-ndjson"}) as r:
+                    if r.status_code >= 400:
+                        EVQ.put(("status", f"Seek failed {r.status_code}: {r.text[:120]}"))
+                        return
+                    for _ in r.iter_lines():
+                        if self.seek_stop.is_set():
+                            break
+                EVQ.put(("status", "Seek finished."))
+            except Exception as e:
+                EVQ.put(("status", f"Seek error: {e}"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def start_game_stream(self, gid):
+        self.game_stop.set()
+        self.game_stop = threading.Event()
+        stop = self.game_stop
+        def work():
+            try:
+                with self.s.get(BASE + f"/api/board/game/stream/{gid}", stream=True,
+                                timeout=(15, None),
+                                headers={**headers(), "Accept":"application/x-ndjson"}) as r:
                     r.raise_for_status()
                     for line in r.iter_lines(decode_unicode=True):
-                        if self.stream_stop.is_set():
-                            break
-                        if not line:
-                            continue
-                        try:
-                            event_q.put(("game_event", json.loads(line)))
-                        except json.JSONDecodeError:
-                            event_q.put(("status", f"Bad JSON: {line[:80]}"))
+                        if stop.is_set(): break
+                        if not line: continue
+                        try: EVQ.put(("game", json.loads(line)))
+                        except Exception: pass
             except Exception as e:
-                event_q.put(("status", f"Stream error: {e}"))
+                EVQ.put(("status", f"Game stream: {e}"))
+        threading.Thread(target=work, daemon=True).start()
 
-        threading.Thread(target=worker, daemon=True).start()
+    def move(self, gid, uci):
+        def work():
+            try:
+                r = self.s.post(BASE + f"/api/board/game/{gid}/move/{uci}", timeout=15)
+                if r.status_code != 200:
+                    EVQ.put(("status", f"Move failed {r.status_code}: {r.text[:100]}"))
+            except Exception as e:
+                EVQ.put(("status", f"Move error: {e}"))
+        threading.Thread(target=work, daemon=True).start()
 
+    def resign(self, gid):
+        if not gid: return
+        threading.Thread(target=lambda: self.s.post(BASE + f"/api/board/game/{gid}/resign", timeout=15),
+                         daemon=True).start()
+
+    def next_puzzle(self, difficulty="normal"):
+        def work():
+            try:
+                # If token lacks puzzle:read, retry anonymously.
+                r = self.s.get(BASE + "/api/puzzle/next",
+                               params={"difficulty":difficulty}, timeout=15)
+                if r.status_code in (401,403):
+                    r = requests.get(BASE + "/api/puzzle/next",
+                                     params={"difficulty":difficulty},
+                                     headers={"User-Agent": headers()["User-Agent"]},
+                                     timeout=15)
+                r.raise_for_status()
+                EVQ.put(("puzzle", r.json()))
+            except Exception as e:
+                EVQ.put(("status", f"Puzzle API: {e}"))
+        threading.Thread(target=work, daemon=True).start()
 
 class App:
-    def __init__(self, client):
+    def __init__(self):
         pygame.init()
-        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · 480×320")
-        self.screen = pygame.display.set_mode((W, H))
+        pygame.display.set_caption("ESP32-C5 Lichess Handheld Simulator · v4")
+        self.sc = pygame.display.set_mode((W,H))
         self.clock = pygame.time.Clock()
-
-        self.font_piece = pygame.font.SysFont("Arial", 27, bold=True)
-        self.font_big = pygame.font.SysFont("Arial", 22, bold=True)
-        self.font = pygame.font.SysFont("Arial", 15)
-        self.font_small = pygame.font.SysFont("Arial", 12)
-
-        self.client = client
+        self.f24 = pygame.font.SysFont("Arial",24,bold=True)
+        self.f18 = pygame.font.SysFont("Arial",18,bold=True)
+        self.f15 = pygame.font.SysFont("Arial",15)
+        self.f12 = pygame.font.SysFont("Arial",12)
+        self.pieces = load_piece_surfaces()
+        self.api = Lichess()
+        self.screen = "home"
+        self.status = "Starting..."
         self.board = chess.Board()
         self.selected = None
-        self.last_move = None
+        self.last = None
         self.my_color = chess.WHITE
-        self.account_id = ""
-        self.opponent = "—"
-        self.status = "Starting..."
-        self.wtime = None
-        self.btime = None
-        self.game_status = "idle"
         self.game_id = None
+        self.game_status = "idle"
+        self.opponent = "—"
+        self.wtime = self.btime = None
+        self.account_id = ""
+        self.ai_level = 3
+        self.ai_time = (5,3)
+        self.online_time = (10,0)
+        self.online_rated = False
+        self.puzzle_diff = "normal"
+        self.puzzle_solution = []
+        self.puzzle_i = 0
+        self.puzzle_color = chess.WHITE
+        self.puzzle_meta = {}
+        threading.Thread(target=self.login, daemon=True).start()
 
-        self.piece_letters = {
-            chess.PAWN: "P",
-            chess.KNIGHT: "N",
-            chess.BISHOP: "B",
-            chess.ROOK: "R",
-            chess.QUEEN: "Q",
-            chess.KING: "K",
-        }
+    def login(self):
+        if not TOKEN:
+            EVQ.put(("status","Offline login: set LICHESS_TOKEN for online/AI. Puzzle still works."))
+            return
+        try:
+            a = self.api.get_account()
+            self.account_id = (a.get("id") or a.get("username") or "").lower()
+            EVQ.put(("status", f"Logged in: {a.get('username')}"))
+            self.api.start_event_stream()
+        except Exception as e:
+            EVQ.put(("status", f"Login failed: {e}"))
 
-    def set_status(self, msg):
-        self.status = str(msg)[:70]
+    def txt(self, s, font=None, c=TEXT):
+        return (font or self.f15).render(str(s), True, c)
 
-    def new_ai_game(self):
-        def worker():
-            event_q.put(("status", "Creating Lichess AI game..."))
+    def button(self, rect, label, on=False, enabled=True):
+        col = BTN_ON if on else BTN
+        if not enabled: col = (48,50,54)
+        pygame.draw.rect(self.sc,col,rect,border_radius=8)
+        surf = self.txt(label,self.f15, TEXT if enabled else (130,130,130))
+        self.sc.blit(surf,surf.get_rect(center=rect.center))
+
+    def setstatus(self,s): self.status=str(s)[:120]
+
+    def home(self): self.screen="home"; self.selected=None
+
+    def start_ai(self):
+        if not TOKEN:
+            self.setstatus("Need LICHESS_TOKEN for AI.")
+            return
+        self.setstatus(f"Starting AI level {self.ai_level}, {self.ai_time[0]}+{self.ai_time[1]}...")
+        def work():
             try:
-                payload = self.client.create_ai_game(level=1, minutes=5, increment=3)
-                gid = payload["id"]
-                event_q.put(("new_game", gid))
-            except Exception as e:
-                event_q.put(("status", f"Create game failed: {e}"))
+                data=self.api.create_ai(self.ai_level,*self.ai_time)
+                EVQ.put(("start_gid",data["id"]))
+            except Exception as e: EVQ.put(("status",f"AI failed: {e}"))
+        threading.Thread(target=work,daemon=True).start()
 
-        threading.Thread(target=worker, daemon=True).start()
+    def start_seek(self):
+        if not TOKEN:
+            self.setstatus("Need LICHESS_TOKEN for online play.")
+            return
+        self.api.seek(*self.online_time,self.online_rated)
 
-    def send_move(self, uci):
-        def worker():
-            ok, msg = self.client.post_move(uci)
-            event_q.put(("status", msg if ok else f"Move failed: {msg}"))
+    def start_gid(self,gid):
+        self.game_id=gid
+        self.screen="game"
+        self.board=chess.Board()
+        self.selected=None
+        self.last=None
+        self.api.start_game_stream(gid)
 
-        threading.Thread(target=worker, daemon=True).start()
+    def process_event(self,d):
+        t=d.get("type")
+        if t=="gameStart":
+            g=d.get("game",{})
+            gid=g.get("gameId") or g.get("id")
+            if gid:
+                self.api.seek_stop.set()
+                self.start_gid(gid)
+        elif t=="challenge":
+            ch=d.get("challenge",{})
+            who=((ch.get("challenger") or {}).get("name") or "Someone")
+            self.setstatus(f"Challenge from {who}")
 
-    def resign(self):
-        def worker():
-            ok, msg = self.client.resign()
-            event_q.put(("status", "Resigned" if ok else f"Resign failed: {msg}"))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def apply_moves(self, moves_text):
-        b = chess.Board()
-        last = None
-        for token in moves_text.split():
+    def apply_moves(self,moves):
+        b=chess.Board()
+        last=None
+        for u in moves.split():
             try:
-                mv = chess.Move.from_uci(token)
-                if mv not in b.legal_moves:
-                    break
-                b.push(mv)
-                last = mv
-            except Exception:
-                break
-        self.board = b
-        self.last_move = last
-        if self.selected is not None:
-            piece = self.board.piece_at(self.selected)
-            if piece is None or piece.color != self.my_color:
-                self.selected = None
+                m=chess.Move.from_uci(u)
+                if m not in b.legal_moves: break
+                b.push(m); last=m
+            except: break
+        self.board=b; self.last=last
 
-    def process_game_event(self, data):
-        typ = data.get("type")
-        if typ == "gameFull":
-            self.game_id = data.get("id", self.game_id)
-            white = data.get("white", {})
-            black = data.get("black", {})
-            white_id = (white.get("id") or "").lower()
-            black_id = (black.get("id") or "").lower()
-
-            if self.account_id == white_id:
-                self.my_color = chess.WHITE
-                self.opponent = black.get("name") or black.get("id") or "Black"
-            elif self.account_id == black_id:
-                self.my_color = chess.BLACK
-                self.opponent = white.get("name") or white.get("id") or "White"
-
-            state = data.get("state", {})
-            self.apply_moves(state.get("moves", ""))
-            self.wtime = state.get("wtime")
-            self.btime = state.get("btime")
-            self.game_status = state.get("status", "started")
-            self.set_status(f"Connected · game {self.game_id}")
-
-        elif typ == "gameState":
-            self.apply_moves(data.get("moves", ""))
-            self.wtime = data.get("wtime")
-            self.btime = data.get("btime")
-            self.game_status = data.get("status", self.game_status)
-            if self.game_status != "started":
-                self.set_status(f"Game ended: {self.game_status}")
-
-    def display_square_to_chess(self, file_idx, rank_idx):
-        if self.my_color == chess.WHITE:
-            file_ = file_idx
-            rank_ = 7 - rank_idx
-        else:
-            file_ = 7 - file_idx
-            rank_ = rank_idx
-        return chess.square(file_, rank_)
-
-    def chess_square_to_display(self, square):
-        file_ = chess.square_file(square)
-        rank_ = chess.square_rank(square)
-        if self.my_color == chess.WHITE:
-            return file_, 7 - rank_
-        else:
-            return 7 - file_, rank_
-
-    def handle_board_click(self, x, y):
-        if not self.game_id or self.game_status not in ("started", "created"):
-            return
-        fx, ry = x // SQ, y // SQ
-        sq = self.display_square_to_chess(fx, ry)
-
-        if self.selected is None:
-            piece = self.board.piece_at(sq)
-            if piece and piece.color == self.my_color and self.board.turn == self.my_color:
-                self.selected = sq
-            return
-
-        if sq == self.selected:
-            self.selected = None
-            return
-
-        piece = self.board.piece_at(self.selected)
-        promotion = None
-        if piece and piece.piece_type == chess.PAWN:
-            target_rank = chess.square_rank(sq)
-            if target_rank in (0, 7):
-                promotion = chess.QUEEN
-
-        mv = chess.Move(self.selected, sq, promotion=promotion)
-        if mv in self.board.legal_moves:
-            uci = mv.uci()
-            self.selected = None
-            self.set_status(f"Sending {uci}...")
-            self.send_move(uci)
-        else:
-            # Allow selecting another own piece directly
-            p2 = self.board.piece_at(sq)
-            if p2 and p2.color == self.my_color:
-                self.selected = sq
+    def process_game(self,d):
+        t=d.get("type")
+        if t=="gameFull":
+            white=d.get("white",{}); black=d.get("black",{})
+            wid=(white.get("id") or "").lower()
+            bid=(black.get("id") or "").lower()
+            if self.account_id and self.account_id==bid:
+                self.my_color=chess.BLACK
+                self.opponent=white.get("name") or white.get("id") or "White"
             else:
-                self.set_status("Illegal move")
-                self.selected = None
+                self.my_color=chess.WHITE
+                self.opponent=black.get("name") or black.get("id") or ("Lichess AI" if black.get("aiLevel") else "Black")
+            st=d.get("state",{})
+            self.apply_moves(st.get("moves",""))
+            self.wtime=st.get("wtime"); self.btime=st.get("btime")
+            self.game_status=st.get("status","started")
+        elif t=="gameState":
+            self.apply_moves(d.get("moves",""))
+            self.wtime=d.get("wtime"); self.btime=d.get("btime")
+            self.game_status=d.get("status",self.game_status)
+
+    def process_puzzle(self,d):
+        try:
+            p=d["puzzle"]; g=d["game"]
+            if p.get("fen"):
+                b=chess.Board(p["fen"])
+            else:
+                pg=chess.pgn.read_game(io.StringIO(g["pgn"]))
+                b=pg.board()
+                moves=list(pg.mainline_moves())
+                for m in moves[:int(p["initialPly"])]:
+                    b.push(m)
+            self.board=b
+            self.my_color=b.turn
+            self.puzzle_color=b.turn
+            self.puzzle_solution=list(p["solution"])
+            self.puzzle_i=0
+            self.puzzle_meta=p
+            self.last=None; self.selected=None
+            self.screen="puzzle_game"
+            self.setstatus(f"Puzzle {p['id']} · rating {p['rating']}")
+        except Exception as e:
+            self.setstatus(f"Puzzle parse failed: {e}")
+
+    def disp_to_sq(self,dx,dy):
+        if self.my_color==chess.WHITE: return chess.square(dx,7-dy)
+        return chess.square(7-dx,dy)
+
+    def sq_to_disp(self,sq):
+        f=chess.square_file(sq); r=chess.square_rank(sq)
+        return (f,7-r) if self.my_color==chess.WHITE else (7-f,r)
+
+    def click_board(self,x,y):
+        sq=self.disp_to_sq(x//SQ,y//SQ)
+        if self.selected is None:
+            p=self.board.piece_at(sq)
+            if p and p.color==self.board.turn:
+                if self.screen=="game" and p.color!=self.my_color: return
+                if self.screen=="puzzle_game" and p.color!=self.puzzle_color: return
+                self.selected=sq
+            return
+        if sq==self.selected:
+            self.selected=None; return
+        p=self.board.piece_at(self.selected)
+        promo=chess.QUEEN if p and p.piece_type==chess.PAWN and chess.square_rank(sq) in (0,7) else None
+        m=chess.Move(self.selected,sq,promotion=promo)
+        if m not in self.board.legal_moves:
+            p2=self.board.piece_at(sq)
+            self.selected=sq if p2 and p2.color==self.board.turn else None
+            return
+        self.selected=None
+        if self.screen=="game":
+            if self.board.turn!=self.my_color: return
+            self.api.move(self.game_id,m.uci())
+        else:
+            exp=self.puzzle_solution[self.puzzle_i] if self.puzzle_i<len(self.puzzle_solution) else None
+            if m.uci()!=exp:
+                self.setstatus("Not the puzzle move. Try again.")
+                return
+            self.board.push(m); self.last=m; self.puzzle_i+=1
+            # Auto-play exactly one opponent reply, then hand control back.
+            if self.puzzle_i<len(self.puzzle_solution):
+                r=chess.Move.from_uci(self.puzzle_solution[self.puzzle_i])
+                if r in self.board.legal_moves:
+                    self.board.push(r); self.last=r; self.puzzle_i+=1
+            if self.puzzle_i>=len(self.puzzle_solution):
+                self.setstatus("Solved! Tap Next for another Lichess puzzle.")
+            else:
+                self.setstatus("Correct. Continue.")
 
     def draw_board(self):
-        light = (235, 236, 208)
-        dark = (115, 149, 82)
-        selected_c = (246, 246, 105)
-        last_c = (205, 210, 106)
-        legal_c = (50, 50, 50)
-
         for dy in range(8):
             for dx in range(8):
-                sq = self.display_square_to_chess(dx, dy)
-                rect = pygame.Rect(dx * SQ, dy * SQ, SQ, SQ)
-                base = light if (dx + dy) % 2 == 0 else dark
-                color = base
-
-                if self.last_move and sq in (self.last_move.from_square, self.last_move.to_square):
-                    color = last_c
-                if sq == self.selected:
-                    color = selected_c
-
-                pygame.draw.rect(self.screen, color, rect)
-
-                piece = self.board.piece_at(sq)
-                if piece:
-                    letter = self.piece_letters[piece.piece_type]
-                    fg = (245, 245, 245) if piece.color == chess.WHITE else (30, 30, 30)
-                    outline = (25, 25, 25) if piece.color == chess.WHITE else (230, 230, 230)
-
-                    # simple "disc + letter" style; reliable on macOS without chess-glyph fonts
-                    center = rect.center
-                    pygame.draw.circle(self.screen, outline, center, 14)
-                    pygame.draw.circle(self.screen, fg, center, 12)
-                    text_color = (30, 30, 30) if piece.color == chess.WHITE else (245, 245, 245)
-                    txt = self.font_piece.render(letter, True, text_color)
-                    self.screen.blit(txt, txt.get_rect(center=center))
-
+                sq=self.disp_to_sq(dx,dy)
+                col=LIGHT if (dx+dy)%2==0 else DARK
+                if self.last and sq in (self.last.from_square,self.last.to_square): col=LAST
+                if sq==self.selected: col=SEL
+                r=pygame.Rect(dx*SQ,dy*SQ,SQ,SQ)
+                pygame.draw.rect(self.sc,col,r)
+                p=self.board.piece_at(sq)
+                if p:
+                    key=("w" if p.color else "b")+{1:"p",2:"n",3:"b",4:"r",5:"q",6:"k"}[p.piece_type]
+                    self.sc.blit(self.pieces[key],self.pieces[key].get_rect(center=r.center))
         if self.selected is not None:
-            for mv in self.board.legal_moves:
-                if mv.from_square != self.selected:
-                    continue
-                dx, dy = self.chess_square_to_display(mv.to_square)
-                cx = dx * SQ + SQ // 2
-                cy = dy * SQ + SQ // 2
-                pygame.draw.circle(self.screen, legal_c, (cx, cy), 5)
+            for m in self.board.legal_moves:
+                if m.from_square==self.selected:
+                    dx,dy=self.sq_to_disp(m.to_square)
+                    pygame.draw.circle(self.sc,(55,55,55),(dx*SQ+20,dy*SQ+20),5)
 
-    @staticmethod
-    def fmt_ms(ms):
-        if ms is None:
-            return "--:--"
-        total = max(0, int(ms) // 1000)
-        return f"{total // 60:02d}:{total % 60:02d}"
+    def fmt(self,ms):
+        if ms is None: return "--:--"
+        s=max(0,int(ms)//1000); return f"{s//60:02d}:{s%60:02d}"
 
-    def draw_button(self, rect, label):
-        pygame.draw.rect(self.screen, (65, 65, 65), rect, border_radius=6)
-        txt = self.font.render(label, True, (245, 245, 245))
-        self.screen.blit(txt, txt.get_rect(center=rect.center))
+    def draw_home(self):
+        self.sc.fill(BG)
+        self.sc.blit(self.txt("Chess Handheld",self.f24),(18,16))
+        self.sc.blit(self.txt("Mac simulator · future ESP32-C5 UI",self.f15,MUTED),(18,48))
+        cards=[
+            (pygame.Rect(18,88,140,110),"Online","Random player"),
+            (pygame.Rect(170,88,140,110),"AI","Level 1–8"),
+            (pygame.Rect(322,88,140,110),"Puzzle","Lichess API"),
+        ]
+        for r,a,b in cards:
+            pygame.draw.rect(self.sc,PANEL,r,border_radius=12)
+            self.sc.blit(self.txt(a,self.f18),(r.x+12,r.y+18))
+            self.sc.blit(self.txt(b,self.f12,MUTED),(r.x+12,r.y+49))
+        self.sc.blit(self.txt(self.status,self.f12,MUTED),(18,280))
+        acct=(self.api.account or {}).get("username","offline")
+        self.sc.blit(self.txt(f"Account: {acct}",self.f12,MUTED),(18,300))
 
-    def draw_sidebar(self):
-        pygame.draw.rect(self.screen, (38, 38, 38), (SIDEBAR_X, 0, 160, 320))
-        x = SIDEBAR_X + 10
+    def draw_selector_screen(self,kind):
+        self.sc.fill(BG)
+        title={"ai":"AI game","online":"Online match","puzzle":"Puzzle"}[kind]
+        self.sc.blit(self.txt(title,self.f24),(18,15))
+        self.button(pygame.Rect(390,12,72,30),"Home")
+        if kind=="ai":
+            self.sc.blit(self.txt("AI strength",self.f15,MUTED),(18,58))
+            for i in range(1,9):
+                r=pygame.Rect(18+(i-1)*55,82,48,34)
+                self.button(r,str(i),self.ai_level==i)
+            self.sc.blit(self.txt("Time control",self.f15,MUTED),(18,138))
+            opts=[(3,0),(5,3),(10,0),(15,10)]
+            for i,o in enumerate(opts):
+                self.button(pygame.Rect(18+i*108,164,96,36),f"{o[0]}+{o[1]}",self.ai_time==o)
+            self.button(pygame.Rect(18,224,444,44),"Start AI game",enabled=bool(TOKEN),on=True)
+        elif kind=="online":
+            self.sc.blit(self.txt("Board API random seek (Rapid/Classical)",self.f15,MUTED),(18,58))
+            opts=[(10,0),(10,5),(15,10),(30,0)]
+            for i,o in enumerate(opts):
+                self.button(pygame.Rect(18+i*108,92,96,36),f"{o[0]}+{o[1]}",self.online_time==o)
+            self.button(pygame.Rect(18,151,210,38),"Casual",not self.online_rated)
+            self.button(pygame.Rect(252,151,210,38),"Rated",self.online_rated)
+            self.button(pygame.Rect(18,218,444,44),"Find opponent",enabled=bool(TOKEN),on=True)
+        else:
+            self.sc.blit(self.txt("Difficulty relative to your puzzle rating",self.f15,MUTED),(18,58))
+            opts=["easiest","easier","normal","harder","hardest"]
+            for i,o in enumerate(opts):
+                self.button(pygame.Rect(18+i*89,90,82,36),o,self.puzzle_diff==o)
+            self.button(pygame.Rect(18,160,444,44),"Get next Lichess puzzle",on=True)
+            self.sc.blit(self.txt("Works anonymously; puzzle:read gives account-aware selection.",self.f12,MUTED),(18,225))
+        self.sc.blit(self.txt(self.status,self.f12,MUTED),(18,292))
 
-        title = self.font_big.render("Lichess", True, (245, 245, 245))
-        self.screen.blit(title, (x, 9))
+    def draw_game(self):
+        self.draw_board()
+        pygame.draw.rect(self.sc,PANEL,(SIDE_X,0,160,320))
+        x=330
+        if self.screen=="game":
+            self.sc.blit(self.txt("Online game",self.f18),(x,10))
+            me=(self.api.account or {}).get("username","You")
+            top=self.opponent if self.my_color==chess.WHITE else me
+            bot=me if self.my_color==chess.WHITE else self.opponent
+            tt=self.btime if self.my_color==chess.WHITE else self.wtime
+            bt=self.wtime if self.my_color==chess.WHITE else self.btime
+            self.sc.blit(self.txt(top,self.f15,MUTED),(x,48))
+            self.sc.blit(self.txt(self.fmt(tt),self.f24),(x,68))
+            self.sc.blit(self.txt(bot,self.f15,MUTED),(x,126))
+            self.sc.blit(self.txt(self.fmt(bt),self.f24),(x,146))
+            self.button(pygame.Rect(330,220,140,32),"Home")
+            self.button(pygame.Rect(330,260,140,32),"Resign")
+        else:
+            p=self.puzzle_meta
+            self.sc.blit(self.txt("Puzzle",self.f18),(x,10))
+            self.sc.blit(self.txt(f"#{p.get('id','')}",self.f15,MUTED),(x,45))
+            self.sc.blit(self.txt(f"Rating {p.get('rating','?')}",self.f18),(x,66))
+            themes=", ".join(p.get("themes",[])[:3])
+            y=104
+            for chunk in [themes[i:i+19] for i in range(0,len(themes),19)][:3]:
+                self.sc.blit(self.txt(chunk,self.f12,MUTED),(x,y)); y+=16
+            self.sc.blit(self.txt(f"{self.puzzle_i}/{len(self.puzzle_solution)} moves",self.f15),(x,167))
+            self.button(pygame.Rect(330,220,140,32),"Home")
+            self.button(pygame.Rect(330,260,140,32),"Next")
+        self.sc.blit(self.txt(self.status[:24],self.f12,MUTED),(330,302))
 
-        my_name = (self.client.account or {}).get("username", "You")
-        top_name = self.opponent if self.my_color == chess.WHITE else my_name
-        bot_name = my_name if self.my_color == chess.WHITE else self.opponent
-
-        top_time = self.btime if self.my_color == chess.WHITE else self.wtime
-        bot_time = self.wtime if self.my_color == chess.WHITE else self.btime
-
-        self.screen.blit(self.font.render(top_name[:18], True, (220, 220, 220)), (x, 48))
-        self.screen.blit(self.font_big.render(self.fmt_ms(top_time), True, (255, 255, 255)), (x, 69))
-
-        pygame.draw.line(self.screen, (80, 80, 80), (x, 112), (470, 112), 1)
-
-        self.screen.blit(self.font.render(bot_name[:18], True, (220, 220, 220)), (x, 126))
-        self.screen.blit(self.font_big.render(self.fmt_ms(bot_time), True, (255, 255, 255)), (x, 147))
-
-        turn_text = "Your turn" if self.board.turn == self.my_color else "Opponent"
-        self.screen.blit(self.font.render(turn_text, True, (190, 190, 190)), (x, 182))
-
-        new_rect = pygame.Rect(330, 215, 140, 34)
-        resign_rect = pygame.Rect(330, 257, 140, 34)
-        self.draw_button(new_rect, "New AI game")
-        self.draw_button(resign_rect, "Resign")
-
-        # Status strip at very bottom, clipped to sidebar
-        status = self.font_small.render(self.status[:23], True, (180, 180, 180))
-        self.screen.blit(status, (x, 302))
-
-    def handle_sidebar_click(self, x, y):
-        if pygame.Rect(330, 215, 140, 34).collidepoint(x, y):
-            self.new_ai_game()
-        elif pygame.Rect(330, 257, 140, 34).collidepoint(x, y):
-            self.resign()
+    def click(self,pos):
+        x,y=pos
+        if self.screen=="home":
+            if pygame.Rect(18,88,140,110).collidepoint(pos): self.screen="online"
+            elif pygame.Rect(170,88,140,110).collidepoint(pos): self.screen="ai"
+            elif pygame.Rect(322,88,140,110).collidepoint(pos): self.screen="puzzle"
+        elif self.screen in ("ai","online","puzzle"):
+            if pygame.Rect(390,12,72,30).collidepoint(pos): self.home(); return
+            if self.screen=="ai":
+                for i in range(1,9):
+                    if pygame.Rect(18+(i-1)*55,82,48,34).collidepoint(pos): self.ai_level=i
+                for i,o in enumerate([(3,0),(5,3),(10,0),(15,10)]):
+                    if pygame.Rect(18+i*108,164,96,36).collidepoint(pos): self.ai_time=o
+                if pygame.Rect(18,224,444,44).collidepoint(pos): self.start_ai()
+            elif self.screen=="online":
+                for i,o in enumerate([(10,0),(10,5),(15,10),(30,0)]):
+                    if pygame.Rect(18+i*108,92,96,36).collidepoint(pos): self.online_time=o
+                if pygame.Rect(18,151,210,38).collidepoint(pos): self.online_rated=False
+                if pygame.Rect(252,151,210,38).collidepoint(pos): self.online_rated=True
+                if pygame.Rect(18,218,444,44).collidepoint(pos): self.start_seek()
+            else:
+                for i,o in enumerate(["easiest","easier","normal","harder","hardest"]):
+                    if pygame.Rect(18+i*89,90,82,36).collidepoint(pos): self.puzzle_diff=o
+                if pygame.Rect(18,160,444,44).collidepoint(pos):
+                    self.setstatus("Loading puzzle...")
+                    self.api.next_puzzle(self.puzzle_diff)
+        elif self.screen in ("game","puzzle_game"):
+            if x<BOARD: self.click_board(x,y)
+            else:
+                if pygame.Rect(330,220,140,32).collidepoint(pos): self.home()
+                elif pygame.Rect(330,260,140,32).collidepoint(pos):
+                    if self.screen=="game": self.api.resign(self.game_id)
+                    else:
+                        self.setstatus("Loading next puzzle...")
+                        self.api.next_puzzle(self.puzzle_diff)
 
     def run(self):
-        running = True
-        while running:
+        run=True
+        while run:
             while True:
-                try:
-                    kind, data = event_q.get_nowait()
-                except queue.Empty:
-                    break
-                if kind == "status":
-                    self.set_status(data)
-                elif kind == "new_game":
-                    self.game_id = data
-                    self.client.game_id = data
-                    self.board = chess.Board()
-                    self.selected = None
-                    self.client.start_game_stream(data)
-                    self.set_status(f"Opening {data}...")
-                elif kind == "game_event":
-                    self.process_game_event(data)
-
-            for ev in pygame.event.get():
-                if ev.type == pygame.QUIT:
-                    running = False
-                elif ev.type == pygame.KEYDOWN:
-                    if ev.key == pygame.K_ESCAPE:
-                        running = False
-                    elif ev.key == pygame.K_n:
-                        self.new_ai_game()
-                    elif ev.key == pygame.K_r:
-                        self.resign()
-                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
-                    x, y = ev.pos
-                    if x < BOARD_PX:
-                        self.handle_board_click(x, y)
-                    else:
-                        self.handle_sidebar_click(x, y)
-
-            self.screen.fill((0, 0, 0))
-            self.draw_board()
-            self.draw_sidebar()
+                try: kind,data=EVQ.get_nowait()
+                except queue.Empty: break
+                if kind=="status": self.setstatus(data)
+                elif kind=="event": self.process_event(data)
+                elif kind=="start_gid": self.start_gid(data)
+                elif kind=="game": self.process_game(data)
+                elif kind=="puzzle": self.process_puzzle(data)
+            for e in pygame.event.get():
+                if e.type==pygame.QUIT: run=False
+                elif e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE: run=False
+                elif e.type==pygame.MOUSEBUTTONDOWN and e.button==1: self.click(e.pos)
+            if self.screen=="home": self.draw_home()
+            elif self.screen in ("ai","online","puzzle"): self.draw_selector_screen(self.screen)
+            else:
+                self.sc.fill((0,0,0)); self.draw_game()
             pygame.display.flip()
             self.clock.tick(30)
-
-        self.client.stop_stream()
+        self.api.event_stop.set(); self.api.game_stop.set(); self.api.seek_stop.set()
         pygame.quit()
 
-
-def main():
-    if not TOKEN:
-        print("ERROR: LICHESS_TOKEN is not set.")
-        print("Run: export LICHESS_TOKEN='your_token_here'")
-        print("Do not paste your token into source code.")
-        sys.exit(1)
-
-    client = LichessClient()
-    try:
-        account = client.check_account()
-        print(f"Connected to Lichess as: {account.get('username')}")
-        print("Controls: mouse = touch, N = new AI game, R = resign, Esc = quit")
-    except Exception as e:
-        print(f"Could not connect to Lichess: {e}")
-        sys.exit(2)
-
-    app = App(client)
-    app.account_id = (account.get("id") or account.get("username") or "").lower()
-    app.set_status(f"Logged in: {account.get('username')}")
-    app.run()
-
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__":
+    App().run()

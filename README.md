@@ -1,86 +1,70 @@
-# Lichess Handheld Mac Simulator
+# ESP32-C5 Lichess Handheld Mac Simulator v4
 
-A 480×320 macOS simulator for the planned ESP32-C5 handheld Lichess client.
+This is a 480×320 Mac-side prototype for the future ESP32-C5 handheld.
 
-## What it tests
+## New in v4
 
-- Lichess authentication with a Personal Access Token
-- Exact 480×320 UI layout
-- 320×320 chessboard + 160px sidebar
-- Mouse clicks as touchscreen taps
-- Create an AI game
-- Stream the game with Lichess Board API NDJSON
-- Submit real UCI moves through the Board API
-- Resign a game
+- Real **Lichess puzzle API** (`GET /api/puzzle/next`)
+- **Online random matchmaking** through Board API seek
+- Selectable online time controls:
+  - 10+0
+  - 10+5
+  - 15+10
+  - 30+0
+- **AI difficulty 1–8**
+- Selectable AI clocks:
+  - 3+0
+  - 5+3
+  - 10+0
+  - 15+10
+- Casual / rated online toggle
+- Chess pieces are embedded directly inside `simulator.py`
+- No piece-image folder is needed
 
-There is **no chess engine assistance** in this simulator.
+## Why not copied Chess.com assets?
 
-## 1. Create a development token
+The exact Chess.com artwork is proprietary. This build uses the open Cburnett Staunton set instead.
+It is embedded in the source, so there is still only one program file to carry around.
 
-On Lichess, create a Personal Access Token with these scopes:
+## Token permissions
+
+Recommended:
 
 - `board:play`
 - `challenge:write`
+- `puzzle:read`
 
-Use a token only for local development. Do not paste it into the source file, Git, screenshots, or chat.
+`challenge:write` is needed for AI challenge creation.
+`board:play` is needed for Board API gameplay and random seeks.
+Puzzle mode can retry anonymously if `puzzle:read` is missing.
 
-## 2. Install
-
-```bash
-cd lichess_handheld_mac_sim
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-```
-
-## 3. Put the token in your shell
+## Install
 
 ```bash
-export LICHESS_TOKEN='PASTE_YOUR_TOKEN_HERE'
+python3.13 -m pip install requests pygame python-chess \
+  -i https://pypi.org/simple \
+  --trusted-host pypi.org \
+  --trusted-host files.pythonhosted.org
 ```
 
-This only sets it for the current Terminal session.
+Once your Python certificate setup is fixed, remove the two `--trusted-host` flags.
 
-Optional quick check:
+## Run
 
 ```bash
-curl https://lichess.org/api/account \
-  -H "Authorization: Bearer $LICHESS_TOKEN"
+export LICHESS_TOKEN='YOUR_TOKEN'
+python3.13 simulator.py
 ```
 
-## 4. Run
+Puzzle mode also works without a token:
 
 ```bash
-python3 simulator.py
+unset LICHESS_TOKEN
+python3.13 simulator.py
 ```
 
-Controls:
+## Board API timing note
 
-- Mouse click = touch
-- Click a piece, then its destination = make a move
-- `N` = new 5+3 AI game
-- `R` = resign
-- `Esc` = quit
-
-The program defaults promotions to a queen for this first prototype.
-
-## Architecture we can keep for the ESP32 version
-
-```text
-UI / chess state
-      |
-      +-- LichessClient
-              |
-              +-- GET /api/board/game/stream/{gameId}
-              +-- POST /api/board/game/{gameId}/move/{uci}
-              +-- POST /api/board/game/{gameId}/resign
-```
-
-Later on ESP32-C5:
-
-- Pygame renderer -> LVGL / TFT_eSPI / esp_lcd renderer
-- Mouse events -> resistive/capacitive touch events
-- `requests` -> ESP-IDF `esp_http_client`
-- Personal token -> OAuth2 PKCE account binding
-
-The game/state logic can remain conceptually the same.
+For **random Board API seeks**, Lichess currently restricts normal matching to Rapid,
+Classical and Correspondence. Blitz is allowed for direct challenges and AI games.
+That is why the online random-match presets begin at 10+0, while AI includes 3+0 and 5+3.
